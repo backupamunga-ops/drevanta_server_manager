@@ -1,7 +1,7 @@
 <script lang="ts">
         import { tick } from 'svelte';
         import { goto } from '$app/navigation';
-        import QRCode from 'qrcode';
+        import { qrSvg as renderQrCode } from '$lib/qr.js';
         import {
                 ApiError,
                 fetchOnboardingStatus,
@@ -28,7 +28,7 @@
                 usernameError
         } from '$lib/onboardingValidate.js';
 
-        type Step = 'loading' | 'claim' | 'mfa-choice' | 'mfa-setup' | 'recovery' | 'done';
+        type Step = 'loading' | 'claim' | 'mfa-setup' | 'recovery' | 'done';
         type TokenMode = 'chip' | 'manual';
 
         const DEFAULT_TOKEN_HINT = 'Paste the whole token or the setup link.';
@@ -74,9 +74,6 @@
         // --- recovery codes --------------------------------------------------
         let recoveryCodes = $state<string[]>([]);
         let codesSaved = $state(false);
-
-        // --- skip path -------------------------------------------------------
-        let riskAcknowledged = $state(false);
 
         // Element refs for focus management.
         let tokenEl = $state<HTMLInputElement | null>(null);
@@ -165,8 +162,9 @@
                         if (s.instance_status === 'mfa_pending') {
                                 // Resume is only possible with the onboarding session created
                                 // by the claim step; otherwise the operator must sign in.
+                                // MFA is mandatory: resuming goes straight to enrolment.
                                 if (s.authenticated) {
-                                        step = 'mfa-choice';
+                                        await beginMfaSetup();
                                 } else {
                                         await goto('/login', { replaceState: true });
                                 }
@@ -321,16 +319,17 @@
                 try {
                         const res = await postJSON<MfaSetup>('/api/v1/onboarding/mfa/setup', {});
                         totpSecret = res.secret;
-                        qrSvg = await QRCode.toString(res.otpauth_uri, {
-                                type: 'svg',
-                                margin: 1,
-                                color: { dark: '#0b1220', light: '#ffffff' }
-                        });
+                        // renderQrCode returns an SVG with explicit width/height;
+                        // a viewBox-only <svg> collapses to 0x0 inside .oqr
+                        // (production bug: blank white pill instead of a QR code).
+                        qrSvg = await renderQrCode(res.otpauth_uri);
                         totpCode = '';
                         step = 'mfa-setup';
                 } catch (err) {
                         stepError = err instanceof ApiError ? err.message : String(err);
-                        step = 'mfa-choice';
+                        // Stay on the setup step: with no secret yet it shows the
+                        // error and a retry button (there is no skip path).
+                        step = 'mfa-setup';
                 } finally {
                         busy = false;
                 }
@@ -350,21 +349,6 @@
                         } else {
                                 stepError = err instanceof ApiError ? err.message : String(err);
                         }
-                } finally {
-                        busy = false;
-                }
-        }
-
-        async function submitSkip() {
-                stepError = '';
-                if (!riskAcknowledged) return;
-                busy = true;
-                try {
-                        await postJSON('/api/v1/onboarding/mfa/skip', { acknowledge_risk: true });
-                        step = 'done';
-                        setTimeout(() => goto('/', { replaceState: true }), 1200);
-                } catch (err) {
-                        stepError = err instanceof ApiError ? err.message : String(err);
                 } finally {
                         busy = false;
                 }
@@ -701,34 +685,8 @@
                                         the server for a fresh one.
                                 </p>
                         </details>
-                {:else if step === 'mfa-choice'}
-                        <section class="ointro">
-                                <h2>Protect the account</h2>
-                                <p>Add a second factor (recommended) or skip it for now. You can decide only during this wizard.</p>
-                        </section>
-
-                        <div class="oactions">
-                                <button class="obtn" type="button" onclick={beginMfaSetup} disabled={busy} class:is-loading={busy} aria-busy={busy}>
-                                        <span class="obtn__spinner" aria-hidden="true"></span>
-                                        <span>{busy ? 'Preparing…' : 'Set up authenticator app'}</span>
-                                </button>
-
-                                <div class="odivider"><span>or</span></div>
-
-                                <div class="owarn-box">
-                                        <strong>Skipping MFA lowers security.</strong> Without a second factor, knowing the
-                                                                                password alone is enough to sign in from anywhere the console is reachable,
-                                                                                and the account will not be 2FA-protected.
-                                </div>
-                                <label class="ocheck-row">
-                                        <input type="checkbox" bind:checked={riskAcknowledged} />
-                                        <span>I understand the risk of running without multi-factor authentication.</span>
-                                </label>
-                                <button class="obtn obtn--danger" type="button" onclick={submitSkip} disabled={!riskAcknowledged || busy}>
-                                        Skip MFA and finish
-                                </button>
-                        </div>
                 {:else if step === 'mfa-setup'}
+                        {#if totpSecret}
                         <section class="ointro">
                                 <h2>Scan and confirm</h2>
                                 <p>
@@ -766,6 +724,18 @@
                                         <span>{busy ? 'Verifying…' : 'Verify and enable MFA'}</span>
                                 </button>
                         </form>
+                        {:else}
+                        <section class="ointro">
+                                <h2>Multi-factor setup</h2>
+                                <p>{stepError || 'The authenticator setup could not be prepared.'}</p>
+                        </section>
+                        <div class="oactions">
+                                <button class="obtn" type="button" onclick={beginMfaSetup} disabled={busy} class:is-loading={busy} aria-busy={busy}>
+                                        <span class="obtn__spinner" aria-hidden="true"></span>
+                                        <span>{busy ? 'Preparing…' : 'Try again'}</span>
+                                </button>
+                        </div>
+                        {/if}
                 {:else if step === 'recovery'}
                         <section class="ointro">
                                 <h2>Save your recovery codes</h2>
@@ -957,27 +927,6 @@
                 height: 1px;
                 margin: 12px 0 12px;
                 background: linear-gradient(90deg, transparent, var(--line) 10%, var(--line) 90%, transparent);
-        }
-
-        .oactions .odivider {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                height: auto;
-                background: none;
-                margin: 4px 0;
-                color: var(--dim);
-                font-size: 12px;
-                text-transform: uppercase;
-                letter-spacing: 0.08em;
-        }
-
-        .oactions .odivider::before,
-        .oactions .odivider::after {
-                content: '';
-                flex: 1;
-                height: 1px;
-                background: var(--line);
         }
 
         /* ---------- intro / loading / error ---------- */
@@ -1400,19 +1349,6 @@
                 filter: saturate(0.75) brightness(0.92);
         }
 
-        .obtn--danger {
-                background: transparent;
-                color: var(--danger);
-                border: 1px solid rgba(255, 107, 107, 0.5);
-                box-shadow: none;
-                font-weight: 600;
-        }
-
-        .obtn--danger:hover {
-                filter: none;
-                background: rgba(255, 107, 107, 0.06);
-        }
-
         .obtn--secondary {
                 background: rgba(255, 255, 255, 0.03);
                 color: var(--muted);
@@ -1530,16 +1466,6 @@
                 margin-top: 14px;
         }
 
-        .owarn-box {
-                background: rgba(255, 180, 84, 0.07);
-                border: 1px solid rgba(255, 180, 84, 0.45);
-                color: var(--warn);
-                border-radius: 10px;
-                padding: 12px 14px;
-                font-size: 13px;
-                line-height: 1.55;
-        }
-
         .ocheck-row {
                 display: flex;
                 align-items: flex-start;
@@ -1561,6 +1487,16 @@
                 width: fit-content;
                 align-self: center;
                 margin: 4px 0 2px;
+        }
+
+        /* The QR SVG must be sized explicitly: a viewBox-only <svg> has no
+           intrinsic size and collapses to 0x0 inside this fit-content box.
+           :global() is required: the <svg> arrives via {@html}. Keep in
+           sync with QR_SIZE in src/lib/qr.js. */
+        .oqr :global(svg) {
+                display: block;
+                width: 184px;
+                height: 184px;
         }
 
         .ocodes-grid {

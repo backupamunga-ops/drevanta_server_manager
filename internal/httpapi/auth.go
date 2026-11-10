@@ -4,7 +4,10 @@
 //
 //	unclaimed --claim(token+credentials)--> mfa_pending
 //	mfa_pending --mfa/verify--> active (mfa_mode=totp)
-//	mfa_pending --mfa/skip----> active (mfa_mode=skipped)
+//
+// MFA is MANDATORY for the initial administrator: there is no skip
+// path. The historical mfa/skip endpoint (mfa_mode="skipped") was
+// removed; instances that skipped before the removal keep working.
 //
 // Security properties enforced here:
 //   - The claim token is single-use, expiring, and stored hashed; a
@@ -250,10 +253,6 @@ type mfaCodeRequest struct {
 	Code string `json:"code"`
 }
 
-type mfaSkipRequest struct {
-	AcknowledgeRisk bool `json:"acknowledge_risk"`
-}
-
 func (s *server) requireMFAPending(w http.ResponseWriter, r *http.Request) bool {
 	state, err := s.st.InstanceState(r.Context())
 	if err != nil {
@@ -340,35 +339,6 @@ func (s *server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		"recovery_codes": codes,
 		"next":           "done",
 	})
-}
-
-func (s *server) handleMFASkip(w http.ResponseWriter, r *http.Request) {
-	sess := sessionFrom(r.Context())
-	if !s.requireMFAPending(w, r) {
-		return
-	}
-	var req mfaSkipRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	if !req.AcknowledgeRisk {
-		writeError(w, http.StatusBadRequest, "risk_not_acknowledged",
-			"skipping MFA requires acknowledging the risk explicitly")
-		return
-	}
-	if err := s.st.FinishOnboarding(r.Context(), "skipped"); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "could not complete onboarding")
-		return
-	}
-	if err := s.st.SetSessionScope(r.Context(), auth.TokenHash(sess.raw), store.ScopeFull); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "could not upgrade session")
-		return
-	}
-	audit(r.Context(), s.st, sess.username, "mfa_skipped", "user",
-		map[string]any{"acknowledged_risk": true})
-	audit(r.Context(), s.st, sess.username, "onboarding_completed", "instance", map[string]any{"mfa_mode": "skipped"})
-	writeJSON(w, http.StatusOK, map[string]any{"mfa_mode": "skipped", "next": "done"})
 }
 
 func generateRecoveryCodes(n int) ([]string, []string, error) {

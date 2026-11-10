@@ -75,7 +75,6 @@ func New(st *store.Store, version string, diskPaths []string) http.Handler {
 	mux.Handle("POST /api/v1/onboarding/claim", srv.guard(srv.handleClaim))
 	mux.Handle("POST /api/v1/onboarding/mfa/setup", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFASetup)))
 	mux.Handle("POST /api/v1/onboarding/mfa/verify", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFAVerify)))
-	mux.Handle("POST /api/v1/onboarding/mfa/skip", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFASkip)))
 
 	// Strict API namespace: unknown /api/* paths are 404 JSON, never the
 	// SPA fallback.

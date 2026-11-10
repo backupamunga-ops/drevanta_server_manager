@@ -145,12 +145,17 @@ func TestMetricsRequiresFullSession(t *testing.T) {
 	}
 	sess := cookieOf(rec)
 	sessHdr := map[string]string{"Cookie": sess.Name + "=" + sess.Value}
-	// MFA skip to reach full scope (the session cookie is unchanged —
-	// only its stored scope is upgraded).
-	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",
-		`{"acknowledge_risk":true}`, sessHdr)
+	// MFA enrolment (mandatory) upgrades the session to full scope (the
+	// session cookie is unchanged — only its stored scope is upgraded).
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", sessHdr)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("skip = %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("mfa setup = %d: %s", rec.Code, rec.Body.String())
+	}
+	mfaSecret := decodeMap(t, rec)["secret"].(string)
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/verify",
+		fmt.Sprintf(`{"code":%q}`, currentTOTP(t, mfaSecret)), sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mfa verify = %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = do(t, h, http.MethodGet, "/api/v1/server/metrics", "", sessHdr)
 	if rec.Code != http.StatusOK {
@@ -318,8 +323,10 @@ func TestOnboardingJourney(t *testing.T) {
 	}
 }
 
-// TestOnboardingSkipPath covers the explicit MFA-skip transition.
-func TestOnboardingSkipPath(t *testing.T) {
+// TestOnboardingSkipRemoved pins that MFA is mandatory for the initial
+// administrator: the historical skip endpoint is gone (404) and the
+// only way out of mfa_pending is a successful mfa/verify.
+func TestOnboardingSkipRemoved(t *testing.T) {
 	h, st := newTestHandler(t)
 	ctx := context.Background()
 
@@ -331,27 +338,40 @@ func TestOnboardingSkipPath(t *testing.T) {
 	sessCookie := cookieOf(rec)
 	sessHdr := map[string]string{"Cookie": sessCookie.Name + "=" + sessCookie.Value}
 
-	// Skipping without acknowledgement is refused.
-	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip", `{}`, sessHdr)
-	if rec.Code != http.StatusBadRequest || errCode(decodeMap(t, rec)) != "risk_not_acknowledged" {
-		t.Fatalf("unacknowledged skip: %d %v", rec.Code, decodeMap(t, rec))
-	}
-	// Acknowledged skip completes onboarding without MFA.
+	// The skip endpoint no longer exists — even with the risk
+	// acknowledged.
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",
 		`{"acknowledge_risk":true}`, sessHdr)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("skip = %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("skip endpoint = %d, want 404 (MFA is mandatory)", rec.Code)
 	}
-	// Login then works password-only.
+
+	// A paused onboarding may sign in password-only, but that session is
+	// onboarding-scoped: no full API access before MFA enrolment.
 	rec = do(t, h, http.MethodPost, "/api/v1/auth/login",
 		`{"username":"admin","password":"correct horse battery"}`, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("password-only login = %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("resume login = %d: %s", rec.Code, rec.Body.String())
 	}
-	rec = do(t, h, http.MethodGet, "/api/v1/server/metrics", "",
-		map[string]string{"Cookie": cookieOf(rec).Name + "=" + cookieOf(rec).Value})
+	if got := decodeMap(t, rec)["scope"]; got != "onboarding" {
+		t.Fatalf("resume login scope = %v, want onboarding (MFA still pending)", got)
+	}
+	resumeHdr := map[string]string{"Cookie": cookieOf(rec).Name + "=" + cookieOf(rec).Value}
+	rec = do(t, h, http.MethodGet, "/api/v1/server/metrics", "", resumeHdr)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("metrics with onboarding scope = %d, want 403", rec.Code)
+	}
+
+	// Only a correct TOTP verify completes onboarding.
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", resumeHdr)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("metrics after skip onboarding = %d", rec.Code)
+		t.Fatalf("setup = %d: %s", rec.Code, rec.Body.String())
+	}
+	secret := decodeMap(t, rec)["secret"].(string)
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/verify",
+		fmt.Sprintf(`{"code":%q}`, currentTOTP(t, secret)), sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify = %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

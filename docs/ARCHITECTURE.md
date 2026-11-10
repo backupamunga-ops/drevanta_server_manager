@@ -82,7 +82,6 @@ nothing. The dashboard shell (HTML/JS) is static content.
 | `/api/v1/onboarding/claim`     | POST   | claim token      | creates the first administrator; single-use token  |
 | `/api/v1/onboarding/mfa/setup` | POST   | session (onb.)   | TOTP secret + `otpauth://` URI                     |
 | `/api/v1/onboarding/mfa/verify`| POST   | session (onb.)   | confirms TOTP, returns 10 recovery codes           |
-| `/api/v1/onboarding/mfa/skip`  | POST   | session (onb.)   | requires `acknowledge_risk:true`; audited          |
 | `/api/v1/auth/login`           | POST   | credentials      | password + TOTP or recovery code when MFA is on    |
 | `/api/v1/auth/logout`          | POST   | any session      | deletes the server-side session                    |
 | `/api/v1/auth/session`         | GET    | public           | current session/instance summary                   |
@@ -146,9 +145,12 @@ kernel reclaimable-pressure semantics.
   `ts` and `action`. Lifecycle events (`daemon_started`/`daemon_stopped`)
   plus every identity-relevant event: `claim_token_created/revoked`,
   `claim_succeeded/rejected`, `admin_created`, `mfa_setup_started`,
-  `mfa_enabled`, `mfa_skipped`, `mfa_verify_failed`, `onboarding_completed`,
+  `mfa_enabled`, `mfa_verify_failed`, `onboarding_completed`,
   `login_success/failed` (with reason, never secret values),
-  `recovery_code_used`, `logout`. Metrics polling is still deliberately
+  `recovery_code_used`, `logout`. MFA is mandatory for the initial
+  administrator — the historical `mfa/skip` endpoint (and its
+  `mfa_skipped` audit event) was removed in 0.4.4. Metrics polling is
+  still deliberately
   not audited (5 s polling would flood the log without adding
   accountability).
 
