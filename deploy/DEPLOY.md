@@ -6,7 +6,7 @@
 
 ## Prerequisites
 
-- Build host: Go ≥ 1.23, Node ≥ 20.
+- Build host: Go ≥ 1.25, Node ≥ 20.
 - Target host: Linux with systemd, `linux/amd64`, SSH access with
   sudo/root for the one-time install.
 - Build the release artifact (the dashboard is embedded, so build web
@@ -113,6 +113,35 @@ For operator-driven upgrades where token delivery must not happen at
 all, install with `--skip-claim`: the installer then issues, rotates
 and delivers nothing and prints the regeneration command as the next
 step.
+
+## Public HTTPS access (opt-in)
+
+Public HTTPS is a SEPARATE unprivileged unit (`drevanta-https.service`,
+user `drevanta-https`, only `CAP_NET_BIND_SERVICE`) managed by the
+root-only access CLI. It never touches the daemon unit, the SQLite
+state, the firewall or SSH.
+
+```sh
+sudo drevanta access status          # mode, certificate state, detected IP, fallback
+sudo drevanta access enable-https    # opt in: trusted cert for the VPS IP (or --domain)
+sudo drevanta access disable-https   # stop public HTTPS; backend and data untouched
+sudo drevanta access configure       # change IP/domain/email/staging on an existing config
+```
+
+- Config: `/etc/drevanta/https.json` (0644, secret-free). State: certs +
+  ACME account key 0600 under `/var/lib/drevanta-https`; secret-free
+  `status.json` next to them.
+- Certificates: Let's Encrypt `shortlived` profile for IP identifiers
+  (RFC 8738, ~160-hour validity) or standard issuance for custom
+  domains; renewal is automatic (hourly check, renew at 2/3 lifetime or
+  <48 h remaining).
+- Fresh installs attempt HTTPS once automatically (`install.sh --https
+  auto|yes|no`); **upgrades never change the access configuration on
+  their own** — on existing machines, enable HTTPS explicitly.
+- Development VPS policy: public HTTPS stays DISABLED on
+  95.211.164.33 until the operator explicitly authorizes external
+  exposure (ports 80/443 + provider firewall). All HTTPS logic is
+  validated against pebble in CI and in local test rigs instead.
 
 ## Verify
 

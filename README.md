@@ -3,8 +3,10 @@
 Drevanta is a Linux VPS self-management platform: a single hardened Go
 daemon (`drevantad`) with an embedded, private web console. It is designed
 for small (512 MB-class) VPS instances and follows a **private-first**
-security model: nothing is exposed to the public internet — the daemon
-binds to loopback only and is reached through an SSH tunnel.
+security model: the daemon binds to loopback only. When public HTTPS is
+enabled (opt-in), a separate minimal proxy serves a publicly trusted
+certificate for the VPS IP address and forwards to the private backend;
+otherwise access is the SSH tunnel. No domain is ever required.
 
 > ## 📘 First time installing Drevanta?
 > **Start with the step-by-step guide:
@@ -15,26 +17,30 @@ binds to loopback only and is reached through an SSH tunnel.
 > README to get running.
 >
 > 🛠️ **Building, transferring artifacts, or contributing?** See
-> [For Developers — Manual Installation & Building from Source](docs/INSTALLATION.md#for-developers--manual-installation--building-from-source)
-> in the same guide — that is where cloning, cross-compilation, SCP and
-> running `deploy/install.sh` directly are documented.
+> [docs/FOR-DEVELOPERS.md](docs/FOR-DEVELOPERS.md) — that is where
+> cloning, cross-compilation, staged installs, the test harness and the
+> release process are documented.
 
-**Status:** Sprint 2.7 — the approved onboarding UI/UX is implemented,
-and the SSH-first installation journey is documented with the
-one-command installer **planned** (it activates when official release
-hosting goes live; no installation URL is functional yet). Today a host
-is set up with the temporary development procedure: a verified build is
-transferred to the server and `deploy/install.sh` runs there. The first
-person to present the single-use claim token becomes the administrator
-through a browser wizard (credentials, TOTP MFA with recovery codes, or
-an explicit, audited MFA skip). Sprint 1's daemon, API, dashboard,
-SQLite audit store, hardened systemd service, CI, and deployment are
-unchanged in spirit and preserved.
+**Status:** Sprint 2.8 — one-command installation with signed release
+verification, direct HTTPS to the VPS IP (publicly trusted certificate,
+no domain required) with the SSH tunnel as the permanent private
+fallback, the `drevanta access` CLI, and the compact onboarding UI.
+Release artifacts publish via signed GitHub Releases
+(`checksums.txt.sig`, Ed25519); the one-command URL in the installation
+guide resolves against those releases. The first person to present the
+single-use claim token becomes the administrator through a browser
+wizard (credentials, TOTP MFA with recovery codes, or an explicit,
+audited MFA skip). The daemon, API, dashboard, SQLite audit store,
+hardened systemd service, CI, and deployment model are unchanged in
+spirit and preserved.
 
 ## Security model (Sprint 1)
 
-- **Loopback-only:** `drevantad` listens on `127.0.0.1:8080` by default.
-  There is no public port, no TLS terminator, no reverse proxy.
+- **Loopback-only daemon:** `drevantad` listens on `127.0.0.1:8080`
+  only. Public HTTPS (when the operator enables it) is a SEPARATE
+  unprivileged `drevanta-https` proxy with a single capability
+  (`CAP_NET_BIND_SERVICE`); the daemon itself never faces the internet
+  and no public plain-HTTP path exists.
 - **Unprivileged:** the service runs as the dedicated `drevanta` system
   user with an empty capability bounding set and a strict systemd
   sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`, …).

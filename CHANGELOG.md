@@ -4,6 +4,74 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.0-access] — one-command install, direct HTTPS to the VPS IP, compact onboarding
+
+### Added
+- **Public HTTPS access layer (`internal/httpsd`, `drevantad https-serve`)** —
+  a separate minimal reverse proxy in front of the loopback-only daemon:
+  publicly trusted certificate for the VPS **public IP address** (RFC 8738)
+  via the Let's Encrypt `shortlived` profile through the maintained lego
+  ACME library; tls-alpn-01 and http-01 answered by the proxy's own
+  listeners; automatic renewal (hourly check, renew at 2/3 lifetime or
+  <48 h remaining); HSTS; port 80 serves only the ACME challenge and
+  redirects; fail closed without a certificate; strict trusted-proxy
+  boundary (inbound `Forwarded`/`X-Forwarded-*` stripped,
+  `X-Forwarded-Proto/For/Host` set exactly once, browser `Host` passed
+  through so the backend's CSRF checks keep working).
+- **`drevanta access status | enable-https | disable-https | configure`** —
+  root-only CLI managing the separate hardened `drevanta-https.service`
+  unit (dedicated unprivileged user + `CAP_NET_BIND_SERVICE` only) and the
+  secret-free `/etc/drevanta/https.json`. Retrying HTTPS never requires a
+  reinstall; disabling never stops the backend or touches data.
+- **Installer `--https auto|yes|no`** — a fresh install attempts public
+  HTTPS once automatically and prints the locked §6 success screen
+  (`https://YOUR_VPS_IP/onboarding#token=…`, "No domain required."); on
+  failure it prints the reason plus the SSH-tunnel fallback (explicitly
+  "on your computer", with the already-connected-user guidance and the
+  `enable-https` retry hint). Upgrades never change the access
+  configuration on their own. `--uninstall` also stops the proxy unit.
+- **Release authenticity**: `checksums.txt` is signed with Ed25519
+  (`checksums.txt.sig`); `bootstrap.sh` verifies the signature against the
+  embedded official public key **before executing anything** and fails
+  closed on a missing signature, wrong key or verification failure. The
+  private key exists only as the `DREVANTA_RELEASE_SIGN_KEY` Actions
+  secret; the release workflow refuses to publish unsigned artifacts.
+- **CI `acme` job** — the httpsd integration suite runs against pebble
+  (Let's Encrypt's test ACME server): IP-identifier order, challenge
+  solving through the real proxy listeners, renewal, fail-closed states.
+- **`docs/FOR-DEVELOPERS.md`** — manual builds, staged installs, test
+  harness, local pebble rigs and the release process.
+
+### Changed
+- **Onboarding UI compacted** per the approved spec: the "Claim this
+  instance" heading, intro paragraph and token explanation are gone; the
+  token chip is now one horizontal row — green check, "Token loaded",
+  masked `drv1_•••XXXX`, functional **Change**; 520 px card, 40 px
+  inputs, reduced gaps; no permanent character checklist or argon2id
+  hint; quiet validation (errors on blur/submit only, cleared as soon as
+  the value is valid, first invalid field focused, token and values
+  preserved); help disclosure teaches the HTTPS-first journey with the
+  SSH fallback.
+- **docs/INSTALLATION.md rewritten** around the real customer journey
+  (buy VPS → SSH → one command → open setup link → administrator → MFA →
+  recovery codes → dashboard); development procedures moved to
+  `docs/FOR-DEVELOPERS.md`.
+- Secure session cookies whenever the request arrives over TLS or
+  through the trusted proxy; per-client rate limiting behind the proxy
+  uses the proxy-set `X-Forwarded-For` (one hop of truth) instead of
+  collapsing all clients into the loopback bucket.
+- The claim setup screen prints the HTTPS link automatically whenever a
+  valid certificate is live, otherwise the SSH-tunnel link.
+- Go toolchain 1.25 (required by lego v4.35).
+
+### Security
+- Port 80 never exposes the backend (challenge + redirect only); no
+  public HTTP fallback exists in any screen or code path.
+- ACME account key and certificate private keys live 0600 in the proxy
+  state directory; the status file is secret-free and world-readable.
+- The development VPS remains unclaimed with public HTTPS **off**;
+  enabling it there requires explicit operator authorization.
+
 ## [Unreleased] — installation UX & documentation correction
 
 Makes the SSH-first installation journey the spine of the user guide
