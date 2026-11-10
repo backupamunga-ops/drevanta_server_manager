@@ -1,6 +1,8 @@
 <script lang="ts">
         import '../app.css';
         import { page } from '$app/state';
+        import { fetchAccessStatus, type AccessStatus } from '$lib/api';
+        import { accessLabel, accessLabelTitle } from '$lib/access.js';
 
         let { children } = $props();
 
@@ -9,6 +11,28 @@
         // opts out of the dashboard shell. Login and the dashboard keep the
         // shell unchanged.
         const bare = $derived(page.url.pathname === '/onboarding' || page.url.pathname.startsWith('/onboarding/'));
+
+        // The access chip is the TRUSTED backend view (root-written config +
+        // proxy status file), never a guess from the browser URL. Re-read on
+        // navigation (login ↔ dashboard) but not on every poll.
+        let access = $state<AccessStatus | null>(null);
+        $effect(() => {
+                const pathname = page.url.pathname; // dependency: refetch on route change
+                void pathname;
+                let cancelled = false;
+                fetchAccessStatus()
+                        .then((a) => {
+                                if (!cancelled) access = a;
+                        })
+                        .catch(() => {
+                                if (!cancelled) access = null;
+                        });
+                return () => {
+                        cancelled = true;
+                };
+        });
+        const label = $derived(accessLabel(access));
+        const labelTitle = $derived(accessLabelTitle(access));
 </script>
 
 {#if bare}
@@ -21,7 +45,7 @@
                                 <span class="brand-name">Drevanta</span>
                                 <span class="brand-sub">server console</span>
                         </div>
-                        <div class="conn">loopback-only · SSH tunnel</div>
+                        <div class="conn" title={labelTitle}>{label}</div>
                 </header>
 
                 <main>
@@ -30,7 +54,7 @@
 
                 <footer>
                         <span>Drevanta · private server console</span>
-                        <span>loopback-only · SSH tunnel required</span>
+                        <span title={labelTitle}>{label}</span>
                 </footer>
         </div>
 {/if}

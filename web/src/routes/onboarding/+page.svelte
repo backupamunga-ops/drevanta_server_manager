@@ -4,11 +4,16 @@
         import { qrSvg as renderQrCode } from '$lib/qr.js';
         import {
                 ApiError,
+                applyDomain,
+                checkDomain,
                 fetchOnboardingStatus,
                 postJSON,
+                skipMfa,
+                type DomainCheckResult,
                 type MfaSetup,
                 type MfaVerified
         } from '$lib/api';
+        import { domainHint } from '$lib/access.js';
         import {
                 hashFromUrl,
                 isValidTokenShape,
@@ -28,7 +33,7 @@
                 usernameError
         } from '$lib/onboardingValidate.js';
 
-        type Step = 'loading' | 'claim' | 'mfa-setup' | 'recovery' | 'done';
+        type Step = 'loading' | 'claim' | 'mfa-setup' | 'recovery' | 'domain' | 'done';
         type TokenMode = 'chip' | 'manual';
 
         const DEFAULT_TOKEN_HINT = 'Paste the whole token or the setup link.';
@@ -74,6 +79,22 @@
         // --- recovery codes --------------------------------------------------
         let recoveryCodes = $state<string[]>([]);
         let codesSaved = $state(false);
+
+        // --- optional MFA ("Skip for now") ---------------------------------
+        // Two explicit steps: reveal the warning, then confirm it. The
+        // backend additionally requires the machine-readable acknowledgement.
+        let skipShown = $state(false);
+        let skipConfirm = $state(false);
+
+        // --- access address (custom domain, optional) ----------------------
+        let domainChoice = $state<'ip' | 'domain'>('ip');
+        let domainInput = $state('');
+        let domainTouched = $state(false);
+        let domainBusy = $state(false);
+        let domainStage = $state<'input' | 'checking' | 'applying' | 'applied'>('input');
+        let domainMsg = $state('');
+        let domainApplied = $state('');
+        let domainError = $state('');
 
         // Element refs for focus management.
         let tokenEl = $state<HTMLInputElement | null>(null);
@@ -162,7 +183,7 @@
                         if (s.instance_status === 'mfa_pending') {
                                 // Resume is only possible with the onboarding session created
                                 // by the claim step; otherwise the operator must sign in.
-                                // MFA is mandatory: resuming goes straight to enrolment.
+                                // MFA is optional: resuming goes to enrolment, which also offers the audited "Skip for now".
                                 if (s.authenticated) {
                                         await beginMfaSetup();
                                 } else {
@@ -328,7 +349,8 @@
                 } catch (err) {
                         stepError = err instanceof ApiError ? err.message : String(err);
                         // Stay on the setup step: with no secret yet it shows the
-                        // error and a retry button (there is no skip path).
+                        // error and a retry button (skip is only offered with a
+                        // scannable secret on screen).
                         step = 'mfa-setup';
                 } finally {
                         busy = false;
@@ -356,6 +378,85 @@
 
         function finishRecovery() {
                 if (!codesSaved) return;
+                step = 'domain';
+        }
+
+        // --- optional MFA: "Skip for now" ----------------------------------
+
+        /** Explicit, audited skip: completes onboarding without MFA. */
+        async function confirmSkipMfa() {
+                if (!skipConfirm || busy) return;
+                busy = true;
+                stepError = '';
+                try {
+                        await skipMfa();
+                        skipShown = false;
+                        skipConfirm = false;
+                        step = 'domain';
+                        announce('Multi-factor skipped for now. You can enable it later in Account Security.');
+                } catch (err) {
+                        stepError = err instanceof ApiError ? err.message : String(err);
+                } finally {
+                        busy = false;
+                }
+        }
+
+        // --- access address: server IP (default) or custom domain ----------
+
+        /** Default path: keep the server-IP address, no extra setup. */
+        function proceedWithIp() {
+                step = 'done';
+                setTimeout(() => goto('/', { replaceState: true }), 1200);
+        }
+
+        const domainErr = $derived(domainHint(domainInput));
+
+        /** Verify DNS points at this VPS (no changes made). */
+        async function submitDomainCheck() {
+                domainTouched = true;
+                domainError = '';
+                domainMsg = '';
+                if (domainErr !== '') return;
+                domainBusy = true;
+                domainStage = 'checking';
+                try {
+                        const res: DomainCheckResult = await checkDomain(domainInput.trim());
+                        domainMsg = res.message;
+                        domainStage = 'input';
+                } catch (err) {
+                        domainError = err instanceof ApiError ? err.message : String(err);
+                        domainStage = 'input';
+                } finally {
+                        domainBusy = false;
+                }
+        }
+
+        /**
+         * Apply the domain: the backend verifies DNS, the certificate is
+         * issued and the full route is verified BEFORE success. Any failure
+         * leaves the working server-IP HTTPS untouched.
+         */
+        async function submitDomainApply() {
+                domainTouched = true;
+                domainError = '';
+                domainMsg = '';
+                if (domainErr !== '') return;
+                domainBusy = true;
+                domainStage = 'applying';
+                try {
+                        const res = await applyDomain(domainInput.trim());
+                        domainApplied = res.domain;
+                        domainStage = 'applied';
+                        announce('Custom domain verified. You can open the console at https://' + res.domain + '/');
+                } catch (err) {
+                        domainError = err instanceof ApiError ? err.message : String(err);
+                        domainStage = 'input';
+                } finally {
+                        domainBusy = false;
+                }
+        }
+
+        function finishDomain() {
                 step = 'done';
                 setTimeout(() => goto('/', { replaceState: true }), 1200);
         }
@@ -719,11 +820,41 @@
                                                 bind:value={totpCode}
                                         />
                                 </div>
-                                <button class="obtn" type="submit" disabled={busy || totpCode.trim().length !== 6} class:is-loading={busy} aria-busy={busy}>
-                                        <span class="obtn__spinner" aria-hidden="true"></span>
-                                        <span>{busy ? 'Verifying…' : 'Verify and enable MFA'}</span>
-                                </button>
-                        </form>
+                                        <button class="obtn" type="submit" disabled={busy || totpCode.trim().length !== 6} class:is-loading={busy} aria-busy={busy}>
+                                                <span class="obtn__spinner" aria-hidden="true"></span>
+                                                <span>{busy ? 'Verifying…' : 'Verify and enable MFA'}</span>
+                                        </button>
+                                </form>
+                                {#if !skipShown}
+                                        <div class="oskip-row">
+                                                <span class="oskip-row__text">Recommended, not required.</span>
+                                                <button class="olinkbtn oskip-row__btn" type="button" onclick={() => (skipShown = true)}>
+                                                        Skip for now
+                                                </button>
+                                        </div>
+                                {:else}
+                                        <div class="owarn" role="alertdialog" aria-label="Skip multi-factor authentication?">
+                                                <p class="owarn__title">Skip multi-factor authentication?</p>
+                                                <ul class="owarn__list">
+                                                        <li>Anyone with your password could sign in as you.</li>
+                                                        <li>A stolen password would be enough to take over this server.</li>
+                                                </ul>
+                                                <p class="owarn__note">You can enable MFA at any time under Account Security. This choice is recorded in the audit log.</p>
+                                                <label class="ocheck-row ocheck-row--tight">
+                                                        <input type="checkbox" bind:checked={skipConfirm} />
+                                                        <span>I understand the risk and want to skip MFA for now.</span>
+                                                </label>
+                                                <div class="owarn__actions">
+                                                        <button class="obtn obtn--danger" type="button" disabled={!skipConfirm || busy} onclick={confirmSkipMfa} aria-busy={busy}>
+                                                                <span class="obtn__spinner" aria-hidden="true"></span>
+                                                                <span>{busy ? 'Skipping…' : 'Skip MFA for now'}</span>
+                                                        </button>
+                                                        <button class="obtn obtn--secondary" type="button" onclick={() => { skipShown = false; skipConfirm = false; }}>
+                                                                Go back and enable MFA
+                                                        </button>
+                                                </div>
+                                        </div>
+                                {/if}
                         {:else}
                         <section class="ointro">
                                 <h2>Multi-factor setup</h2>
@@ -755,8 +886,109 @@
                                 <span>I have stored these codes somewhere safe (password manager or printed copy).</span>
                         </label>
                         <button class="obtn" type="button" onclick={finishRecovery} disabled={!codesSaved}>
-                                Finish onboarding
+                                Continue
                         </button>
+                {:else if step === 'domain'}
+                        <section class="ointro">
+                                <h2>Choose your access address</h2>
+                                <p>
+                                        The console is live on this server's IP address with a trusted certificate. You can
+                                        keep it, or use your own domain instead — both stay available.
+                                </p>
+                        </section>
+                        <div class="ochoice" role="radiogroup" aria-label="Access address">
+                                <button
+                                        class="ochoice__opt"
+                                        class:is-active={domainChoice === 'ip'}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={domainChoice === 'ip'}
+                                        onclick={() => (domainChoice = 'ip')}
+                                >
+                                        <span class="ochoice__title">Continue with the server IP</span>
+                                        <span class="ochoice__sub">Ready now — no extra setup.</span>
+                                </button>
+                                <button
+                                        class="ochoice__opt"
+                                        class:is-active={domainChoice === 'domain'}
+                                        type="button"
+                                        role="radio"
+                                        aria-checked={domainChoice === 'domain'}
+                                        onclick={() => (domainChoice = 'domain')}
+                                >
+                                        <span class="ochoice__title">I have a domain</span>
+                                        <span class="ochoice__sub">We verify DNS and issue a trusted certificate.</span>
+                                </button>
+                        </div>
+                        {#if domainChoice === 'domain'}
+                                <div class="ofield">
+                                        <div class="olabel-row">
+                                                <label class="olabel" for="domain-input">Your domain</label>
+                                                <span class="olabel-note">optional</span>
+                                        </div>
+                                        <input
+                                                class="oinput oinput--mono"
+                                                id="domain-input"
+                                                type="text"
+                                                placeholder="vpn.example.com"
+                                                autocomplete="off"
+                                                autocapitalize="off"
+                                                spellcheck="false"
+                                                aria-describedby="domain-hint domain-msg domain-err"
+                                                aria-invalid={domainTouched && domainErr !== ''}
+                                                bind:value={domainInput}
+                                                onblur={() => (domainTouched = true)}
+                                        />
+                                        <p class="oerr" id="domain-hint" hidden={!(domainTouched && domainErr !== '')}>{domainErr}</p>
+                                </div>
+                                {#if domainStage !== 'applied'}
+                                        <div class="oactions oactions--tight">
+                                                <button
+                                                        class="obtn"
+                                                        type="button"
+                                                        disabled={busy || domainErr !== '' || domainStage !== 'input'}
+                                                        class:is-loading={busy}
+                                                        aria-busy={busy}
+                                                        onclick={submitDomainApply}
+                                                >
+                                                        <span class="obtn__spinner" aria-hidden="true"></span>
+                                                        <span>
+                                                                {#if domainStage === 'applying'}
+                                                                        Verifying DNS, issuing certificate…
+                                                                {:else}
+                                                                        Verify DNS and enable HTTPS for this domain
+                                                                {/if}
+                                                        </span>
+                                                </button>
+                                                <button class="obtn obtn--secondary" type="button" disabled={busy || domainErr !== ''} onclick={submitDomainCheck}>
+                                                        Check DNS only
+                                                </button>
+                                        </div>
+                                {/if}
+                                {#if domainMsg}
+                                        <p class="ohint" id="domain-msg">{domainMsg}</p>
+                                {/if}
+                                {#if domainError}
+                                        <p class="oerr" id="domain-err" role="alert">{domainError}</p>
+                                {/if}
+                                {#if domainStage === 'applied'}
+                                        <div class="oapplied" role="status">
+                                                <p>
+                                                        <strong>https://{domainApplied}</strong> is verified and serving. The server-IP address keeps
+                                                        working too. You can change the domain later in Settings.
+                                                </p>
+                                                <button class="obtn" type="button" onclick={finishDomain}>Open the console</button>
+                                        </div>
+                                {/if}
+                        {/if}
+                        <div class="oactions oactions--tight">
+                                <button class="obtn obtn--secondary" type="button" onclick={proceedWithIp}>
+                                        {domainChoice === 'ip' ? 'Continue with the server IP' : 'Skip — keep using the server IP'}
+                                </button>
+                        </div>
+                        <div class="ometa">
+                                <span>no account with any external service is required</span>
+                        </div>
                 {:else if step === 'done'}
                         <section class="odone">
                                 <div class="odone__icon" aria-hidden="true">
@@ -1483,10 +1715,10 @@
         .oqr {
                 background: #ffffff;
                 border-radius: 10px;
-                padding: 12px;
+                padding: 10px;
                 width: fit-content;
                 align-self: center;
-                margin: 4px 0 2px;
+                margin: 2px 0 0;
         }
 
         /* The QR SVG must be sized explicitly: a viewBox-only <svg> has no
@@ -1553,6 +1785,162 @@
                 line-height: 1.65;
                 color: var(--muted);
                 max-width: 44ch;
+        }
+
+        /* ---------- optional MFA: skip row + warning ---------- */
+        .oskip-row {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 6px;
+                margin-top: 2px;
+        }
+
+        .oskip-row__text {
+                font-size: 12.25px;
+                color: var(--dim);
+        }
+
+        .oskip-row__btn {
+                color: var(--warn);
+        }
+
+        .oskip-row__btn:hover {
+                color: var(--warn);
+        }
+
+        .owarn {
+                margin-top: 4px;
+                padding: 12px 14px;
+                border: 1px solid rgba(255, 180, 84, 0.4);
+                background: rgba(255, 180, 84, 0.07);
+                border-radius: 10px;
+                animation: rise 0.3s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .owarn__title {
+                margin: 0;
+                font-size: 13.5px;
+                font-weight: 700;
+                color: var(--warn);
+        }
+
+        .owarn__list {
+                margin: 6px 0 0;
+                padding-left: 18px;
+                font-size: 12.75px;
+                line-height: 1.55;
+                color: var(--muted);
+        }
+
+        .owarn__note {
+                margin: 6px 0 0;
+                font-size: 12.25px;
+                line-height: 1.5;
+                color: var(--dim);
+        }
+
+        .owarn__actions {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                margin-top: 10px;
+        }
+
+        .ocheck-row--tight {
+                margin-top: 8px;
+                font-size: 12.75px;
+        }
+
+        .obtn--danger {
+                background: linear-gradient(180deg, #ff8585, #e96464);
+                color: #1c0707;
+                box-shadow:
+                        0 1px 0 rgba(255, 255, 255, 0.25) inset,
+                        0 12px 32px -16px rgba(255, 107, 107, 0.8);
+        }
+
+        .obtn--danger .obtn__spinner {
+                border-color: rgba(28, 7, 7, 0.3);
+                border-top-color: #1c0707;
+        }
+
+        /* ---------- access address choice (compact) ---------- */
+        .ochoice {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+                margin-top: 2px;
+        }
+
+        .ochoice__opt {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+                padding: 11px 12px;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                background: #080c11;
+                cursor: pointer;
+                font: inherit;
+                text-align: left;
+                transition:
+                        border-color 0.16s ease,
+                        background 0.16s ease;
+        }
+
+        .ochoice__opt:hover {
+                border-color: var(--line-hi);
+        }
+
+        .ochoice__opt.is-active {
+                border-color: rgba(61, 220, 151, 0.5);
+                background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.03));
+                box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .ochoice__opt:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.6);
+                outline-offset: 2px;
+        }
+
+        .ochoice__title {
+                font-size: 13px;
+                font-weight: 600;
+                color: var(--text);
+        }
+
+        .ochoice__sub {
+                font-size: 11.75px;
+                line-height: 1.45;
+                color: var(--dim);
+        }
+
+        .oactions--tight {
+                margin-top: 2px;
+                gap: 8px;
+        }
+
+        .oapplied {
+                margin-top: 4px;
+                padding: 11px 13px;
+                border: 1px solid rgba(61, 220, 151, 0.35);
+                background: rgba(61, 220, 151, 0.07);
+                border-radius: 10px;
+                animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .oapplied p {
+                margin: 0 0 10px;
+                font-size: 12.75px;
+                line-height: 1.55;
+                color: var(--muted);
+        }
+
+        .oapplied strong {
+                font-family: var(--mono);
+                color: #c8f4de;
+                font-weight: 600;
         }
 
         /* ---------- responsive ---------- */

@@ -1,6 +1,7 @@
 <script lang="ts">
         import { goto } from '$app/navigation';
-        import { ApiError, fetchSession, postJSON, type LoginResult } from '$lib/api';
+        import { ApiError, fetchAccessStatus, fetchSession, postJSON, type LoginResult } from '$lib/api';
+        import { accessLabelTitle } from '$lib/access.js';
 
         let username = $state('');
         let password = $state('');
@@ -8,6 +9,15 @@
         let totpRequired = $state(false);
         let busy = $state(false);
         let error = $state('');
+
+        // Trusted access mode from the daemon (never the browser URL): the
+        // subtitle is honest about how this console is being reached.
+        let accessTitle = $state('');
+        $effect(() => {
+                fetchAccessStatus()
+                        .then((a) => (accessTitle = accessLabelTitle(a)))
+                        .catch(() => (accessTitle = ''));
+        });
 
         async function submit(e: SubmitEvent) {
                 e.preventDefault();
@@ -66,7 +76,7 @@
 <div class="auth-wrap">
         <div class="auth-card">
                 <h1 class="auth-title">Sign in</h1>
-                <p class="auth-sub">Private console over an SSH tunnel. Access is limited to the instance administrator.</p>
+                <p class="auth-sub">{accessTitle || "Access is limited to the instance administrator."}</p>
 
                 {#if error}
                         <div class="error" role="alert">{error}</div>

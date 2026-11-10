@@ -92,11 +92,16 @@
                         {#if session?.mfa_enabled}
                                 <span class="mfa-pill" title="multi-factor authentication is enabled">mfa on</span>
                         {:else}
-                                <span class="mfa-pill warn" title="MFA was skipped during onboarding">mfa off</span>
+                                <a
+                                        class="mfa-pill warn"
+                                        href="/settings"
+                                        title="MFA is not enabled — set it up under Account Security"
+                                >mfa off</a>
                         {/if}
                 </div>
                 <div class="userbox">
                         <span>{session?.username}</span>
+                        <a class="btn btn--link" href="/settings">Settings</a>
                         <button class="btn" onclick={signOut}>Sign out</button>
                 </div>
         </div>
@@ -174,5 +179,12 @@
         .mfa-pill.warn {
                 color: var(--accent-warn);
                 border-color: rgba(251, 191, 36, 0.5);
+                text-decoration: none;
+        }
+
+        .btn--link {
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
         }
 </style>

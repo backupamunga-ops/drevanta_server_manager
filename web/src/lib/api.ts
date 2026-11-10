@@ -134,3 +134,93 @@ export interface MfaVerified {
 export async function logout(): Promise<void> {
 	await postJSON('/api/v1/auth/logout', {}).catch(() => undefined);
 }
+
+// --- Post-install access (trusted status + custom domain) ---
+
+/** Trusted access mode as reported by the daemon (never guessed from the URL). */
+export interface DomainStatusInfo {
+	host: string;
+	phase: string;
+	cert_valid: boolean;
+	not_after?: string;
+	last_error?: string;
+}
+
+export interface HttpsStatusInfo {
+	enabled: boolean;
+	host?: string;
+	phase?: string;
+	cert_valid: boolean;
+	not_after?: string;
+	staging?: boolean;
+	domain?: DomainStatusInfo | null;
+}
+
+export interface AccessStatus {
+	mode: 'https' | 'private';
+	https?: HttpsStatusInfo | null;
+}
+
+export async function fetchAccessStatus(): Promise<AccessStatus> {
+	const res = await fetch('/api/v1/access/status', { headers: { accept: 'application/json' } });
+	if (!res.ok) throw new ApiError(res.status, 'http_error', `HTTP ${res.status}`);
+	return (await res.json()) as AccessStatus;
+}
+
+export interface DomainCheckResult {
+	domain: string;
+	resolved?: string[];
+	expected?: string[];
+	matches: boolean;
+	message: string;
+}
+
+export function checkDomain(domain: string): Promise<DomainCheckResult> {
+	return postJSON<DomainCheckResult>('/api/v1/access/domain/check', { domain });
+}
+
+export interface DomainApplyResult {
+	ok: boolean;
+	domain: string;
+	not_after?: string;
+	url?: string;
+}
+
+export function applyDomain(domain: string): Promise<DomainApplyResult> {
+	return postJSON<DomainApplyResult>('/api/v1/access/domain/apply', { domain });
+}
+
+export function removeDomain(): Promise<{ ok: boolean }> {
+	return postJSON<{ ok: boolean }>('/api/v1/access/domain/remove', { confirm: true });
+}
+
+// --- Optional MFA ("Skip for now") + Account Security ---
+
+export interface SkipResult {
+	user: { username: string };
+	instance_status: InstanceStatus;
+	mfa_mode: string;
+	next: string;
+}
+
+export function skipMfa(): Promise<SkipResult> {
+	return postJSON<SkipResult>('/api/v1/onboarding/mfa/skip', { acknowledge_risk: true });
+}
+
+export interface AccountMfaStatus {
+	mfa_enabled: boolean;
+	mfa_mode: string;
+	recovery_codes_unused: number;
+}
+
+export function fetchAccountMfa(): Promise<AccountMfaStatus> {
+	return getJSON<AccountMfaStatus>('/api/v1/account/mfa');
+}
+
+export function accountMfaSetup(): Promise<MfaSetup> {
+	return postJSON<MfaSetup>('/api/v1/account/mfa/setup', {});
+}
+
+export function accountMfaVerify(code: string): Promise<MfaVerified> {
+	return postJSON<MfaVerified>('/api/v1/account/mfa/verify', { code });
+}
