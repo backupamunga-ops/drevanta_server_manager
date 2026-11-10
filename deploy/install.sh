@@ -13,11 +13,13 @@
 #      points the /opt/drevanta/current symlink at it (atomic flip).
 #   3. Installs the hardened, unprivileged systemd unit (user "drevanta")
 #      and enables + starts it.
-#   4. Waits for GET /readyz. On failure it rolls the symlink back to the
+#   4. Installs the friendly "drevanta" front-end (sudo drevanta claim
+#      regenerate) in $BIN_LINK_DIR.
+#   5. Waits for GET /readyz. On failure it rolls the symlink back to the
 #      previous release automatically and reports the journal excerpt.
-#   5. For a fresh (unclaimed) instance it issues the single-use, expiring
+#   6. For a fresh (unclaimed) instance it issues the single-use, expiring
 #      first-owner claim token and prints it ONCE (optionally also to
-#      --token-file, mode 0600).
+#      --token-file, mode 0600). --skip-claim defers the token entirely.
 #
 # Re-running is safe: same version + same checksum → no-op; new version →
 # upgrade with automatic rollback on failed readiness.
@@ -38,6 +40,8 @@ CLAIM_TTL="${DREVANTA_CLAIM_TTL:-30m}"
 BIND_ADDR="${DREVANTA_BIND_ADDR:-127.0.0.1}"
 # Local port of the documented SSH tunnel (locked first-time-setup UX).
 TUNNEL_LOCAL_PORT="${DREVANTA_TUNNEL_LOCAL_PORT:-18080}"
+# Where the friendly "drevanta" front-end is installed.
+BIN_LINK_DIR="${DREVANTA_BIN_LINK_DIR:-/usr/local/bin}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_BINARY="${SCRIPT_DIR}/../dist/drevantad-linux-amd64"
@@ -317,6 +321,16 @@ install_release() {
         # Operations helpers.
         install -m 0755 "${SCRIPT_DIR}/rollback.sh"   "$OPT_DIR/bin/rollback.sh"   2>/dev/null || true
         install -m 0755 "${SCRIPT_DIR}/healthgate.sh" "$OPT_DIR/bin/healthgate.sh" 2>/dev/null || true
+        # Friendly operator front-end: sudo drevanta claim regenerate
+        if [[ -f "${SCRIPT_DIR}/drevanta.sh" ]]; then
+                mkdir -p "$BIN_LINK_DIR" 2>/dev/null || true
+                if install -m 0755 "${SCRIPT_DIR}/drevanta.sh" "$BIN_LINK_DIR/drevanta" 2>/dev/null; then
+                        info "operator front-end installed: $BIN_LINK_DIR/drevanta (try: sudo drevanta claim status)"
+                else
+                        warn "could not install $BIN_LINK_DIR/drevanta — the technical CLI still works:"
+                        warn "  sudo -u $DAEMON_USER $OPT_DIR/current/drevantad claim regenerate --data-dir $STATE_DIR"
+                fi
+        fi
 }
 
 migrate_legacy_layout() {
@@ -548,6 +562,9 @@ print_success_screen() {
 
   Raw token (fallback): ${token}
 
+  Lost this link or it expired? Run on the VPS:
+  sudo drevanta claim regenerate
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
         if [[ -n "$note" ]]; then
@@ -560,6 +577,11 @@ EOF
 
 issue_claim_token() {
         STEP="claim token"
+        if [[ "${DREVANTA_SKIP_CLAIM:-0}" == "1" || "${SKIP_CLAIM:-0}" == "1" ]]; then
+                info "claim-token step skipped (--skip-claim): no token issued or rotated"
+                info "when you are ready to onboard, run: sudo drevanta claim regenerate"
+                return 0
+        fi
         local token_file="$1"
         local status version
         status="$(http_get "http://${BIND_ADDR}:${PORT}/api/v1/onboarding/status" || echo "")"
@@ -572,7 +594,7 @@ issue_claim_token() {
                 info "an active claim token already exists - it is NOT re-issued"
                 info "(re-issuing would rotate and invalidate it). Open"
                 info "http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding and paste it, or rotate on purpose with:"
-                info "  sudo -u $DAEMON_USER $OPT_DIR/current/drevantad claim init --data-dir $STATE_DIR"
+                info "  sudo drevanta claim regenerate"
                 return 0
         fi
 
@@ -616,6 +638,7 @@ issue_claim_token() {
                 info "noninteractive install: claim token written to $target_file (mode 0600)"
                 info "retrieve it with: sudo cat $target_file"
                 info "then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding (via SSH tunnel) and paste it"
+                info "if the token expires before you use it, get a fresh link with: sudo drevanta claim regenerate"
         fi
 }
 
@@ -644,6 +667,8 @@ options:
   --port N            loopback port (default: $PORT)
   --ttl DURATION      claim token lifetime (default: $CLAIM_TTL)
   --token-file PATH   also write the claim token here, mode 0600
+  --skip-claim        do not issue, rotate, or deliver any claim token
+                      (operator will run: sudo drevanta claim regenerate)
   --purge             (with --uninstall) also delete /var/lib/drevanta state
   -h, --help          this help
 EOF
@@ -687,6 +712,7 @@ main() {
                         --port)        PORT="${2:?}"; shift 2 ;;
                         --ttl)         CLAIM_TTL="${2:?}"; shift 2 ;;
                         --token-file)  token_file="${2:?}"; shift 2 ;;
+                        --skip-claim)  SKIP_CLAIM=1; shift ;;
                         *) usage >&2; return 2 ;;
                 esac
         done
@@ -713,11 +739,12 @@ main() {
 }
 
 uninstall() {
-        local purge="$1"
+        local purge="${1:-0}"
         STEP="uninstall"
         log "Stopping and removing the $SERVICE_NAME service"
         systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
         rm -f "$UNIT_PATH"
+        rm -f "$BIN_LINK_DIR/drevanta"
         sys_daemon_reload
         rm -f "$OPT_DIR/current"
         if [[ "$purge" == "1" ]]; then

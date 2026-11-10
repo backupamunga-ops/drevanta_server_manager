@@ -88,16 +88,31 @@ ssh -N -L 18080:127.0.0.1:8080 root@HOST
 
 - Fresh install (interactive) → the installer screen already contains the
   ready-to-open `#token=` link; open it and the token field prefills.
-- Token expired or lost? Regenerate on the VPS — one command, prints the
-  setup link once and rotates out any previous token:
+- Token expired or lost? Regenerate on the VPS — one documented command,
+  prints the setup link once and rotates out any previous token:
 
 ```sh
-runuser -u drevanta -- /opt/drevanta/current/drevantad claim init \
+sudo drevanta claim regenerate
+```
+
+  The installer installs this front-end at `/usr/local/bin/drevanta`
+  (source: `deploy/drevanta.sh`); it runs the claim subcommands as the
+  unprivileged service user and refuses to touch the daemon itself
+  (`serve` is systemd's job). The equivalent long form, if the
+  front-end is unavailable:
+
+```sh
+runuser -u drevanta -- /opt/drevanta/current/drevantad claim regenerate \
         --data-dir /var/lib/drevanta
 ```
 
 - Later visits → `/login` (password + authenticator code, or a recovery
   code if the authenticator is lost).
+
+For operator-driven upgrades where token delivery must not happen at
+all, install with `--skip-claim`: the installer then issues, rotates
+and delivers nothing and prints the regeneration command as the next
+step.
 
 ## Verify
 
@@ -158,14 +173,19 @@ attended upgrades with a 10 s window.
 
 ```sh
 go build -o /tmp/drevantad ./cmd/drevantad
-bash deploy/tests/test_install.sh /tmp/drevantad     # 49 assertions
+bash deploy/tests/test_install.sh /tmp/drevantad     # 112 assertions
 ```
 
 Covers: preflight pass/arch-fail/port-fail, fresh install (release,
 symlink, hardened unit, token file 0600, masked stdout, real hashed
-token in SQLite), idempotent re-run, upgrade, auto-rollback on a broken
-release, rollback failure path, health-gate decisions (healthy → accept;
-broken → roll back; manually switched → inert), uninstall.
+token in SQLite), interactive success screen, no-reissue with a live
+token, `claim init` screen/rotation, the `drevanta` front-end (status,
+version, regenerate, `serve` refusal), `--skip-claim` (no token minted
+or printed), docs↔CLI parity (guide commands exist in the binary;
+README links the guide), idempotent re-run, upgrade, auto-rollback on a
+broken release, rollback failure path, health-gate decisions (healthy →
+accept; broken → roll back; manually switched → inert), uninstall
+(including front-end removal).
 
 ## Security notes
 
@@ -173,6 +193,9 @@ broken → roll back; manually switched → inert), uninstall.
   interface.
 - The claim token is shown once and stored only hashed server-side; keep
   `--token-file` root-only (0600) and delete it after onboarding.
-- The `drevanta` user has no shell, no home, no sudo membership.
+- The `drevanta` user has no shell, no home, no sudo membership. The
+  `/usr/local/bin/drevanta` front-end only re-executes the claim CLI as
+  that user (via `runuser`); it cannot start, stop, or reconfigure the
+  service and adds no network surface.
 - Uninstall: `sudo install.sh --uninstall` (keeps releases and state;
   `--purge` also deletes `/var/lib/drevanta` — audit log, accounts).

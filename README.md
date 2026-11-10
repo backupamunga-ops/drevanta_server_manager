@@ -6,13 +6,22 @@ for small (512 MB-class) VPS instances and follows a **private-first**
 security model: nothing is exposed to the public internet — the daemon
 binds to loopback only and is reached through an SSH tunnel.
 
-**Status:** Sprint 2 — secure installer + first-owner onboarding. A host
-is set up with one verified command; the first person to present the
-single-use claim token becomes the administrator through a browser
-wizard (credentials, TOTP MFA with recovery codes, or an explicit,
-audited MFA skip). Sprint 1's daemon, API, dashboard, SQLite audit store,
-hardened systemd service, CI, and deployment are unchanged in spirit and
-preserved.
+> ## 📘 First time installing Drevanta?
+> **Start with the step-by-step guide:
+> [docs/INSTALLATION.md](docs/INSTALLATION.md)** — written for first-time
+> VPS owners: one-command install, the one-time setup link, tunnel setup
+> (Windows PowerShell & Linux/macOS), creating the administrator, MFA,
+> and troubleshooting. You will not need anything else from this README
+> to get running.
+
+**Status:** Sprint 2.6 — secure installer, first-owner onboarding, and a
+one-command fallback (`sudo drevanta claim regenerate`) for lost or
+expired setup links. A host is set up with one verified command; the
+first person to present the single-use claim token becomes the
+administrator through a browser wizard (credentials, TOTP MFA with
+recovery codes, or an explicit, audited MFA skip). Sprint 1's daemon,
+API, dashboard, SQLite audit store, hardened systemd service, CI, and
+deployment are unchanged in spirit and preserved.
 
 ## Security model (Sprint 1)
 
@@ -52,10 +61,20 @@ sudo deploy/install.sh                 # preflight + install + start + verify
 sudo deploy/install.sh preflight       # checks only, changes nothing
 ```
 
-The installer prints a masked, single-use, expiring claim token and can
-also store it root-only (`--token-file`); full details and the rollback
-drill are in `deploy/DEPLOY.md`. Re-running the installer is always safe
-(idempotent; upgrades roll back automatically if `/readyz` fails).
+The installer prints the ready-to-open, single-use setup link (token
+prefilled) straight to your terminal and installs the friendly
+`drevanta` front-end, so the fallback for a lost or expired link is one
+documented command:
+
+```sh
+sudo drevanta claim regenerate         # fresh one-time setup link, invalidates the old one
+sudo drevanta claim status             # onboarding state (no secrets)
+```
+
+Full walkthrough for first-time VPS owners: `docs/INSTALLATION.md`.
+Re-running the installer is always safe (idempotent; upgrades roll back
+automatically if `/readyz` fails; `--skip-claim` defers token handling
+entirely).
 
 ## Accessing the deployed dev instance
 

@@ -117,6 +117,7 @@ export_mock_env() {
         export DREVANTA_STATE_DIR="$sandbox/state"
         export DREVANTA_UNIT_PATH="$sandbox/systemd/drevanta.service"
         export DREVANTA_SYSTEMD_RUN_DIR="$sandbox/systemd-run"
+        export DREVANTA_BIN_LINK_DIR="$sandbox/bin-link"
         export DREVANTA_SKIP_ROOT_CHECK=1
         export DREVANTA_RUNUSER="$mockdir/runuser"
         export PATH="$mockdir:/usr/local/bin:/usr/bin:/bin"
@@ -288,6 +289,94 @@ test_claim_init_cli_screen() {
         [[ "$tok2" =~ ^drv1_ && "$tok2" != "$tok" ]] && pass "authorized regeneration issues a fresh token" || fail "regeneration broken"
 }
 
+test_wrapper_frontend() {
+        section "friendly drevanta front-end (sudo drevanta claim regenerate)"
+        [[ -x "$sandbox/bin-link/drevanta" ]] && pass "wrapper installed to bin-link dir" || { fail "wrapper missing"; return; }
+
+        local st_out
+        st_out="$("$sandbox/bin-link/drevanta" claim status 2>/dev/null)"
+        [[ "$st_out" == *"instance_status="* ]] && pass "claim status works through the wrapper" || fail "status via wrapper broken: $st_out"
+
+        local ver
+        ver="$("$sandbox/bin-link/drevanta" version 2>/dev/null)"
+        [[ "$ver" == "$(get_version "$sandbox/staged-drevantad")" ]] && pass "version passthrough" || fail "version mismatch: $ver"
+
+        local o e tok
+        o="$("$sandbox/bin-link/drevanta" claim regenerate 2>"$sandbox/wrapper_err.log")"
+        e="$(cat "$sandbox/wrapper_err.log")"
+        tok="$(printf '%s' "$o" | head -n1)"
+        [[ "$tok" =~ ^drv1_[A-Za-z0-9_-]{43}$ ]] && pass "regenerate via wrapper prints raw token" || fail "wrapper token malformed: '$tok'"
+        printf '%s' "$e" | grep -q "NEW CLAIM TOKEN ISSUED" && pass "regenerate screen headline" || fail "no regenerate headline"
+        printf '%s' "$e" | grep -q "http://127.0.0.1:18080/onboarding#token=$tok" && pass "wrapper link matches token" || fail "wrapper link mismatch"
+        printf '%s' "$e" | grep -q "The previous claim token (if any) is now invalid." && pass "rotation explained to the operator" || fail "no rotation note"
+        printf '%s' "$e" | grep -q "Token expires in 30 minutes." && pass "wrapper screen TTL copy" || fail "wrapper TTL copy wrong"
+
+        "$sandbox/bin-link/drevanta" serve >/dev/null 2>&1
+        [[ $? -eq 2 ]] && pass "wrapper refuses to start the daemon manually" || fail "serve not blocked"
+        "$sandbox/bin-link/drevanta" --help >/dev/null 2>&1 && pass "wrapper help works" || fail "wrapper help broken"
+        "$sandbox/bin-link/drevanta" 2>/dev/null | grep -q "claim regenerate" && pass "bare wrapper advertises regenerate" || fail "no usage hint"
+}
+
+test_skip_claim() {
+        section "--skip-claim: upgrade path that never touches tokens"
+        # The state dir already holds a live claim token (earlier tests). A
+        # --skip-claim install must leave it exactly as it is: no rotation,
+        # no delivery, no token file. Same state dir also keeps the unit
+        # byte-identical for the idempotency assertions that follow.
+        local before_status
+        before_status="$("$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null)"
+        grep -q "claim_token_active=true" <<<"$before_status" \
+                && : || fail "precondition: no live token in shared state"
+        rm -f "$sandbox/state/claim-default.txt"
+        "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" \
+                --skip-claim >"$sandbox/install_skip.log" 2>&1
+        local rc=$?
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_skip.log"; return; }
+        grep -q "claim-token step skipped" "$sandbox/install_skip.log" && pass "skip reported" || fail "no skip message"
+        grep -q "sudo drevanta claim regenerate" "$sandbox/install_skip.log" && pass "documented next step shown" || fail "no next step"
+        if grep -q "drv1_" "$sandbox/install_skip.log"; then fail "token leaked despite --skip-claim"; else pass "no token anywhere in output"; fi
+        if grep -q "claim token written to" "$sandbox/install_skip.log"; then fail "token file written despite --skip-claim"; else pass "no token file delivered"; fi
+        local after_status
+        after_status="$("$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null)"
+        [[ "$after_status" == "$before_status" ]] && pass "live token untouched (no rotation)" \
+                || fail "token state changed: $before_status -> $after_status"
+}
+
+test_docs_match_cli() {
+        section "documentation commands match the actual CLI"
+        local repo
+        repo="$(dirname "$DEPLOY")"
+        local doc="$repo/docs/INSTALLATION.md"
+        [[ -f "$doc" ]] && pass "docs/INSTALLATION.md exists" || { fail "installation guide missing"; return; }
+        local bin="$sandbox/staged-drevantad"
+
+        # Commands documented in the guide must be real: cross-check against
+        # the binary's own usage output.
+        local cli_help claim_help
+        cli_help="$("$bin" help 2>&1 || true)"
+        claim_help="$("$bin" claim 2>&1 || true)"
+        local frag
+        for frag in "claim regenerate" "claim status" "claim revoke"; do
+                if grep -qF "$frag" "$doc" && ! printf '%s\n%s' "$cli_help" "$claim_help" | grep -qF "$frag"; then
+                        fail "docs reference '$frag' but the CLI does not list it"
+                else
+                        pass "doc command '$frag' exists in the CLI"
+                fi
+        done
+        # The guide must teach the real, locked tunnel + link format.
+        for frag in "ssh -N -L 18080:127.0.0.1:8080" "/onboarding#token=" "Token expires"; do
+                grep -qF "$frag" "$doc" && pass "guide states: $frag" || fail "guide missing: $frag"
+        done
+        # README must link the guide prominently.
+        grep -qF "docs/INSTALLATION.md" "$repo/README.md" \
+                && pass "README links the installation guide" || fail "README does not link the guide"
+        # The wrapper's advertised commands must exist in drevantad.
+        for frag in "regenerate" "status" "revoke"; do
+                grep -qF "claim $frag" "$DEPLOY/drevanta.sh" \
+                        && pass "wrapper advertises claim $frag" || fail "wrapper missing claim $frag"
+        done
+}
+
 test_install_idempotent() {
         section "idempotent re-run changes nothing"
         echo '{"instance_status":"active","mfa_mode":"totp","claim_token_active":false,"authenticated":false}' > "$MOCK_STATUS_FILE"
@@ -379,9 +468,10 @@ test_healthgate() {
 }
 
 test_uninstall() {
-        section "uninstall removes unit, keeps releases and state"
+        section "uninstall removes unit, front-end, keeps releases and state"
         "$DEPLOY/install.sh" --uninstall >"$sandbox/uninstall.log" 2>&1 && pass "exit 0" || fail "exit $?"
         [[ ! -f "$sandbox/systemd/drevanta.service" ]] && pass "unit removed" || fail "unit still present"
+        [[ ! -e "$sandbox/bin-link/drevanta" ]] && pass "front-end removed" || fail "front-end still present"
         [[ -d "$sandbox/opt/releases" ]] && pass "releases preserved" || fail "releases removed"
         [[ -d "$sandbox/state" ]] && pass "state kept without --purge" || fail "state wiped"
 }
@@ -405,6 +495,9 @@ main() {
         test_noninteractive_default_token_file
         test_no_reissue_when_token_active
         test_claim_init_cli_screen
+        test_wrapper_frontend
+        test_skip_claim
+        test_docs_match_cli
         test_install_idempotent
         test_install_upgrade_and_autorollback
         test_rollback_script

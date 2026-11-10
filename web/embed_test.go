@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -39,14 +40,19 @@ func TestPrerenderedRoutesServedDirectly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", c.path, err)
 		}
-		body := make([]byte, 65536)
-		n, _ := resp.Body.Read(body)
+		// io.ReadAll: a single Read may return a partial TCP segment
+		// and truncate mid-<head> (this flaked when the <title> sat
+		// just past the first segment boundary).
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		srv.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", c.path, err)
+		}
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s = %d", c.path, resp.StatusCode)
 		}
-		if !strings.Contains(string(body[:n]), "<title>"+c.wantTitle+"</title>") {
+		if !strings.Contains(string(body), "<title>"+c.wantTitle+"</title>") {
 			t.Fatalf("GET %s served the wrong page: title marker %q not found", c.path, c.wantTitle)
 		}
 	}

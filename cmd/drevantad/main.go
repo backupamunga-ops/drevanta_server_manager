@@ -2,11 +2,12 @@
 //
 // Subcommands:
 //
-//	drevantad serve              run the HTTP daemon (default when no subcommand)
-//	drevantad claim init         create/rotate the first-owner claim token (prints it ONCE)
-//	drevantad claim status       show claim token / onboarding state (no secrets)
-//	drevantad claim revoke       revoke the active claim token
-//	drevantad version            print the version
+//	drevantad serve                 run the HTTP daemon (default when no subcommand)
+//	drevantad claim init            create/rotate the first-owner claim token (prints it ONCE)
+//	drevantad claim regenerate      friendly alias: re-issue the claim token (prints it ONCE)
+//	drevantad claim status          show claim token / onboarding state (no secrets)
+//	drevantad claim revoke          revoke the active claim token
+//	drevantad version               print the version
 //
 // Design invariants:
 //   - Loopback-only by default: the only network surface is 127.0.0.1.
@@ -31,7 +32,7 @@ import (
 )
 
 // version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.3.2-onboard-ux"
+var version = "0.3.3-claim-regen"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
@@ -51,7 +52,7 @@ func main() {
 		case "serve":
 			os.Exit(cmdServe(os.Args[2:]))
 		case "claim":
-			os.Exit(cmdClaim(os.Args[2:]))
+			os.Exit(cmdClaim(os.Args[2:], os.Stdout, os.Stderr))
 		case "version", "--version":
 			fmt.Println(version)
 			os.Exit(0)
@@ -67,14 +68,19 @@ func main() {
 func usage(topic string) {
 	switch topic {
 	case "claim":
-		fmt.Fprint(os.Stderr, `usage: drevantad claim <init|status|revoke> [flags]
+		fmt.Fprint(os.Stderr, `usage: drevantad claim <init|regenerate|status|revoke> [flags]
 
-  init     create a new first-owner claim token (revokes any previous
-           unconsumed token), print it once and show the ready-to-open
-           setup link. Only allowed while the instance is unclaimed.
-  status   print the onboarding state and whether an active, unexpired
-           claim token exists (no secrets).
-  revoke   revoke the active claim token.
+  init         create a new first-owner claim token (revokes any previous
+               unconsumed token), print it once and show the ready-to-open
+               setup link. Only allowed while the instance is unclaimed.
+  regenerate   same token semantics as init, worded as the operator-facing
+               fallback for a lost or expired setup link — installed as
+               "sudo drevanta claim regenerate". Only allowed while the
+               instance is unclaimed; permanently refused once an owner
+               exists.
+  status       print the onboarding state and whether an active, unexpired
+               claim token exists (no secrets).
+  revoke       revoke the active claim token.
 
 flags:
   --data-dir DIR   state directory holding drevanta.db (default /var/lib/drevanta)
@@ -84,11 +90,12 @@ flags:
 	default:
 		fmt.Fprint(os.Stderr, `usage: drevantad [serve|claim|version] [flags]
 
-  serve           run the HTTP daemon (default)
-  claim init      issue the first-owner claim token and show the setup link
-  claim status    show onboarding state (no secrets)
-  claim revoke    revoke the active claim token
-  version         print the version
+  serve                run the HTTP daemon (default)
+  claim init           issue the first-owner claim token and show the setup link
+  claim regenerate     re-issue the claim token (lost/expired link fallback)
+  claim status         show onboarding state (no secrets)
+  claim revoke         revoke the active claim token
+  version              print the version
 `)
 	}
 }
@@ -108,7 +115,7 @@ func cmdServe(args []string) int {
 	return 0
 }
 
-func cmdClaim(args []string) int {
+func cmdClaim(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage("claim")
 		return 2
@@ -134,40 +141,8 @@ func cmdClaim(args []string) int {
 	}
 
 	switch args[0] {
-	case "init":
-		state, err := st.InstanceState(ctx)
-		if err != nil {
-			slogError("drevantad claim: state", err)
-			return 1
-		}
-		if state.Status != "unclaimed" {
-			fmt.Fprintln(os.Stderr, "instance is already claimed; no claim token is issued")
-			return 1
-		}
-		token, hash, err := newToken()
-		if err != nil {
-			slogError("drevantad claim: generate", err)
-			return 1
-		}
-		// Authoritative first-owner guard: refuses once claimed, even
-		// if the state read above raced with a claim.
-		ct, err := st.CreateClaimTokenIfUnclaimed(ctx, hash, *ttl)
-		if err != nil {
-			if errors.Is(err, store.ErrAlreadyClaimed) {
-				fmt.Fprintln(os.Stderr, "instance is already claimed; no claim token is issued")
-				return 1
-			}
-			slogError("drevantad claim: store", err)
-			return 1
-		}
-		auditEvent(ctx, st, "drevantad", "claim_token_created", "claim",
-			map[string]any{"ttl_minutes": ttl.Minutes(), "expires_at": ct.ExpiresAt.Format(time.RFC3339)})
-		// The plaintext token is printed exactly once: line 1 of stdout
-		// (machine-readable) plus the setup screen on stderr. It is never
-		// stored or logged anywhere else.
-		fmt.Println(token)
-		printClaimSetupScreen(os.Stderr, token, *ttl, *port)
-		return 0
+	case "init", "regenerate":
+		return runClaimIssue(ctx, st, args[0], *ttl, *port, stdout, stderr)
 	case "status":
 		state, err := st.InstanceState(ctx)
 		if err != nil {
@@ -178,13 +153,13 @@ func cmdClaim(args []string) int {
 		if ct, err := st.ActiveClaimToken(ctx); err == nil && ct.ExpiresAt.After(time.Now()) {
 			tokenActive = true
 		}
-		fmt.Printf("instance_status=%s mfa_mode=%q claim_token_active=%t\n",
+		fmt.Fprintf(stdout, "instance_status=%s mfa_mode=%q claim_token_active=%t\n",
 			state.Status, state.MFAMode, tokenActive)
 		return 0
 	case "revoke":
 		ct, err := st.ActiveClaimToken(ctx)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "no active claim token")
+			fmt.Fprintln(stderr, "no active claim token")
 			return 1
 		}
 		if err := st.RevokeClaimToken(ctx, ct.ID); err != nil {
@@ -192,7 +167,7 @@ func cmdClaim(args []string) int {
 			return 1
 		}
 		auditEvent(ctx, st, "drevantad", "claim_token_revoked", "claim", nil)
-		fmt.Println("claim token revoked")
+		fmt.Fprintln(stdout, "claim token revoked")
 		return 0
 	default:
 		usage("claim")
@@ -200,11 +175,56 @@ func cmdClaim(args []string) int {
 	}
 }
 
+// runClaimIssue is the single token-issuance path shared by `claim init`
+// (used by the installer) and `claim regenerate` (the operator-facing
+// fallback for a lost or expired link). Both verbosities use the exact
+// same security semantics: issue only while unclaimed, rotate out any
+// previous unconsumed token, store only the SHA-256 hash, print the
+// plaintext exactly once (stdout line 1 + setup screen on stderr), and
+// write an audit event that never contains the token.
+func runClaimIssue(ctx context.Context, st *store.Store, verb string, ttl time.Duration, port string, stdout, stderr io.Writer) int {
+	if state, err := st.InstanceState(ctx); err == nil && state.Status != "unclaimed" {
+		fmt.Fprintln(stderr, "instance is already claimed; no claim token is issued")
+		return 1
+	}
+	token, hash, err := newToken()
+	if err != nil {
+		slogError("drevantad claim: generate", err)
+		return 1
+	}
+	// Authoritative first-owner guard: refuses once claimed, even if the
+	// state read above raced with a claim.
+	ct, err := st.CreateClaimTokenIfUnclaimed(ctx, hash, ttl)
+	if err != nil {
+		if errors.Is(err, store.ErrAlreadyClaimed) {
+			fmt.Fprintln(stderr, "instance is already claimed; no claim token is issued")
+			return 1
+		}
+		slogError("drevantad claim: store", err)
+		return 1
+	}
+	action := "claim_token_created"
+	if verb == "regenerate" {
+		action = "claim_token_regenerated"
+	}
+	auditEvent(ctx, st, "drevantad", action, "claim",
+		map[string]any{"ttl_minutes": ttl.Minutes(), "expires_at": ct.ExpiresAt.Format(time.RFC3339)})
+	// The plaintext token is printed exactly once: line 1 of stdout
+	// (machine-readable) plus the setup screen on stderr. It is never
+	// stored or logged anywhere else.
+	fmt.Fprintln(stdout, token)
+	printClaimSetupScreen(stderr, token, ttl, port, verb)
+	return 0
+}
+
 // sshHint derives the SSH tunnel target from the current session when it
 // is reliably known: SSH_CONNECTION carries the server address the
 // operator is connected to, and the invoking identity tells the SSH
-// username. When either is unknown, a clearly labelled placeholder is
-// returned instead of a guess.
+// username. The drevanta wrapper (deploy/drevanta.sh) recovers the same
+// pair from the operator's own utmp login entry and passes it on as
+// DREVANTA_SSH_HOST / DREVANTA_SSH_USER — still first-party session
+// data, never a guess. When a value is unknown, a clearly labelled
+// placeholder is returned instead.
 func sshHint() (ip, user string, complete bool) {
 	ip = ""
 	if sc := os.Getenv("SSH_CONNECTION"); sc != "" {
@@ -216,9 +236,12 @@ func sshHint() (ip, user string, complete bool) {
 		ip = envIP
 	}
 	user = ""
-	if su := os.Getenv("SUDO_USER"); su != "" && su != "root" {
-		user = su
-	} else if os.Geteuid() == 0 && ip != "" {
+	switch {
+	case os.Getenv("DREVANTA_SSH_USER") != "":
+		user = os.Getenv("DREVANTA_SSH_USER")
+	case os.Getenv("SUDO_USER") != "" && os.Getenv("SUDO_USER") != "root":
+		user = os.Getenv("SUDO_USER")
+	case os.Geteuid() == 0 && ip != "":
 		user = "root" // this session IS root over SSH, not a guess
 	}
 	return ip, user, ip != "" && user != ""
@@ -234,10 +257,12 @@ func humanTTL(d time.Duration) string {
 }
 
 // printClaimSetupScreen writes the locked first-time-setup instructions
-// (tunnel command, one-time setup link, raw fallback token) to w. It is
-// only ever printed to the operator's own terminal (stderr of the claim
-// command), never logged or persisted.
-func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonPort string) {
+// (tunnel command, one-time setup link, raw fallback token) to w. verb
+// selects the headline wording: "init" for the installer's first token,
+// "regenerate" for the operator-issued replacement. It is only ever
+// printed to the operator's own terminal (stderr of the claim command),
+// never logged or persisted.
+func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonPort, verb string) {
 	ip, user, known := sshHint()
 	if ip == "" {
 		ip = "<your-vps-ip>"
@@ -246,8 +271,12 @@ func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonP
 		user = "<ssh-user>"
 	}
 	link := fmt.Sprintf("http://127.0.0.1:%s/onboarding#token=%s", setupLinkPort, token)
+	headline := "✓ CLAIM TOKEN ISSUED"
+	if verb == "regenerate" {
+		headline = "✓ NEW CLAIM TOKEN ISSUED"
+	}
 	fmt.Fprintf(w, `
-✓ CLAIM TOKEN ISSUED
+%s
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -269,7 +298,10 @@ func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonP
   Raw token (fallback): %s
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`, setupLinkPort, daemonPort, user, ip, link, humanTTL(ttl), token)
+`, headline, setupLinkPort, daemonPort, user, ip, link, humanTTL(ttl), token)
+	if verb == "regenerate" {
+		fmt.Fprintln(w, "  The previous claim token (if any) is now invalid.")
+	}
 	if !known {
 		fmt.Fprintln(w, "  (replace the placeholder with this server's address and your SSH user)")
 	}

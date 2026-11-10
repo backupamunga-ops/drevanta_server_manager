@@ -4,6 +4,80 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.3.3-claim-regen] — 2026-11-10
+
+Sprint 2.6: onboarding completion & documentation. Extends the locked
+Sprint 2.5 first-time UX with a friendly manual fallback — one simple,
+documented command re-issues the setup link — and a complete,
+first-time-owner installation guide. No working 2.5 behaviour changed.
+
+### Added
+- **`sudo drevanta claim regenerate`** — the operator-facing fallback
+  for a lost or expired setup link. `deploy/drevanta.sh` is installed
+  by the installer as `/usr/local/bin/drevanta`: it runs the claim
+  subcommands as the unprivileged `drevanta` service user, refuses to
+  start the daemon manually (`serve` is systemd's job), and passes the
+  operator's real SSH session (server address + login user, recovered
+  first-party from the current utmp entry) to the printed tunnel hint.
+  Bare `drevanta` prints a short usage; `drevanta --help` explains the
+  subcommands and points at the installation guide.
+- **`drevantad claim regenerate`** — the underlying subcommand. Shares
+  the single token-issuance path with `claim init` (only while the
+  instance is unclaimed, rotates out the previous token, stores only
+  the SHA-256 hash, prints the plaintext exactly once, writes an
+  audit event `claim_token_regenerated` without the token). Its setup
+  screen differs from `init` only in the headline ("NEW CLAIM TOKEN
+  ISSUED") and an explicit "the previous claim token (if any) is now
+  invalid" note. Refused permanently once an owner exists.
+- **`install.sh --skip-claim`** — operator-driven upgrades where token
+  delivery is deliberately deferred: the installer issues, rotates and
+  delivers nothing, and prints the documented next step
+  (`sudo drevanta claim regenerate`). Also accepted as
+  `DREVANTA_SKIP_CLAIM=1`.
+- **`docs/INSTALLATION.md`** — complete first-time installation guide
+  for a first-time VPS owner: prerequisites/OS support, one-command
+  install, example success screen (redacted token), automatic token
+  delivery, manual regeneration, Windows PowerShell and Linux/macOS
+  tunnel instructions, opening the token-prefilled URL, creating the
+  first administrator, MFA + recovery codes, sign-in, troubleshooting
+  (expired tokens, closed terminals, tunnel/port problems, wrong
+  URLs), why Drevanta is loopback-only by default, and the future
+  optional public-HTTPS model. Ends with a command reference table.
+- Installer harness: docs↔CLI parity test — every command documented
+  in the guide must exist in `drevantad`'s own usage output, the guide
+  must teach the real tunnel/link formats, and README must link it.
+
+### Changed
+- The installer's rotation hints and the noninteractive delivery hint
+  now advertise `sudo drevanta claim regenerate` instead of the
+  technical `runuser`/`sudo -u` form (the long form still works).
+- The interactive success screen adds a "Lost this link or it expired?"
+  line pointing at the regeneration command.
+- Uninstall removes the front-end (`$BIN_LINK_DIR/drevanta`).
+- README links the installation guide prominently and documents the
+  `drevanta` front-end; DEPLOY.md uses the friendly command.
+
+### Security
+- The front-end adds no network surface and no privilege: commands run
+  as the unprivileged `drevanta` user exactly as before, tokens are
+  still printed only once to the invoking terminal, and the wrapper
+  cannot touch the daemon process itself (systemd-only `serve`).
+- `--skip-claim` gives deployment flows a way to guarantee "no token
+  was minted or rotated" — asserted by a new harness test.
+
+### Tests
+- Go: 10 new tests in `cmd/drevantad` — regenerate happy path (token +
+  full screen, stdout carries only the token line), rotation
+  invalidation (previous token revoked, only the new one active),
+  rejection after claiming (no token printed, non-zero exit, nothing
+  rotated), init/regenerate output consistency, real-session info via
+  `DREVANTA_SSH_HOST`/`DREVANTA_SSH_USER`, usage lists `regenerate`,
+  TTL flag respected, fresh data-dir creation, sshHint precedence.
+- Installer harness: 80 → 112 assertions — the `drevanta` front-end
+  (status/version/regenerate through the wrapper, `serve` refusal,
+  usage advertises regenerate), `--skip-claim` (no token in output,
+  none minted), docs↔CLI parity, uninstall removes the front-end.
+
 ## [0.3.2-onboard-ux] — 2026-11-10
 
 Locked first-time installation UX: the claim token reaches the operator

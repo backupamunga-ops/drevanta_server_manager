@@ -47,7 +47,7 @@ jobs:
 
       - name: shellcheck deploy scripts
         run: |
-          shellcheck deploy/install.sh deploy/rollback.sh deploy/healthgate.sh deploy/tests/test_install.sh
+          shellcheck deploy/install.sh deploy/rollback.sh deploy/healthgate.sh deploy/drevanta.sh deploy/tests/test_install.sh
 
       - name: build daemon for the harness
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/drevantad-harness ./cmd/drevantad
