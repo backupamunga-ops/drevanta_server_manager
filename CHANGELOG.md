@@ -4,6 +4,39 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.4] — production HTTPS hotfix: ACME profile + MFA fixes
+
+### Fixed
+- **Public HTTPS provisioning failed on Let's Encrypt production** with
+  "Default profile does not permit IP address identifiers." The
+  production directory advertises ACME profiles under `meta.profiles`,
+  not at the top level the way test CAs do; the profile-selection code
+  only inspected the top level, silently dropped the requested
+  `shortlived` profile, and the default-profile order was rejected for
+  IP identifiers. Profiles are now read from both directory shapes, and
+  the new-order request carries `profile: shortlived` for IP
+  certificates.
+- **Fail closed on profile selection for IP identifiers**: if the CA
+  does not advertise the required profile (or the directory cannot be
+  read), issuance aborts with a clear error instead of silently
+  requesting a default-profile order. DNS-name orders keep the default
+  fallback.
+- **MFA QR code rendered as a blank white pill** (reported as "shows
+  the literal text svg"): the `qrcode` SVG carried only a `viewBox` and
+  no intrinsic size, collapsing to 0x0 inside the fit-content
+  container. The QR is now generated with explicit width/height and
+  sized via CSS. Regression-tested.
+
+### Changed
+- **MFA is now mandatory for the initial administrator** (no skip
+  path): the onboarding wizard goes straight from administrator
+  creation to authenticator enrolment, the `mfa/skip` API endpoint was
+  removed, and the resume flow re-enters enrolment directly. Instances
+  that skipped before this change keep working (password-only login).
+- Pebble CI rig now advertises the `shortlived` profile so the ACME
+  integration exercises the exact production path (profile included in
+  the new-order request).
+
 ## [0.4.3] — release integrity
 
 ### Fixed
