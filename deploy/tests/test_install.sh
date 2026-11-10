@@ -110,7 +110,7 @@ echo "useradd $*" >> "${MOCK_SYSTEMCTL_STATE:?}/calls"
 exit 0
 EOF
         chmod +x "$mockdir/getent" "$mockdir/useradd"
-        for t in uname awk df sha256sum install diff journalctl head sleep seq mkdir ln mv chmod chown grep basename dirname readlink cat sed tr cut stat ls touch rm printf echo; do
+        for t in uname awk df sha256sum install diff journalctl head sleep seq mkdir ln mv chmod chown grep basename dirname readlink cat sed tr cut stat ls touch rm printf echo openssl; do
                 p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$mockdir/$t"
         done
         # Real curl, captured before the mock PATH exists: the bootstrap
@@ -542,7 +542,7 @@ PYEOF
 }
 
 test_bootstrap_installer() {
-        section "bootstrap: verified download -> install, tampering refused"
+        section "bootstrap: signature+checksum verified download -> install, tampering refused"
 
         local fixture="$sandbox/bootstrap-fixture"
         mkdir -p "$fixture"
@@ -551,6 +551,15 @@ test_bootstrap_installer() {
                 "$DEPLOY/healthgate.sh" "$fixture/"
         ( cd "$fixture" && sha256sum drevantad-linux-amd64 install.sh drevanta.sh \
                 rollback.sh healthgate.sh > checksums.txt )
+
+        # Release-signing fixtures: the harness signs checksums.txt with its
+        # own Ed25519 key and points the bootstrap at that public key. The
+        # production key exists only as a GitHub Actions secret.
+        openssl genpkey -algorithm ed25519 -out "$fixture/release-sign.pem" 2>/dev/null
+        openssl pkey -in "$fixture/release-sign.pem" -pubout -out "$fixture/release-pub.pem" 2>/dev/null
+        openssl genpkey -algorithm ed25519 -out "$fixture/wrong-sign.pem" 2>/dev/null
+        sign_fixture() { ( cd "$fixture" && openssl pkeyutl -sign -inkey "$1" -rawin -in checksums.txt -out checksums.txt.sig ); }
+        sign_fixture release-sign.pem
         write_fixture_server
         python3 "$sandbox/fixture_server.py" "$fixture" v0.0.0-test \
                 "$sandbox/fixture.port" >/dev/null 2>&1 &
@@ -586,7 +595,34 @@ test_bootstrap_installer() {
                 DREVANTA_OPT_DIR="$boot_opt"
                 DREVANTA_STATE_DIR="$sandbox/state-boot"
                 DREVANTA_BIN_LINK_DIR="$sandbox/bin-link-boot"
+                DREVANTA_BOOTSTRAP_PUBKEY="$(cat "$fixture/release-pub.pem")"
         )
+
+        # 0a. An UNSIGNED checksums file is refused (fail closed).
+        rm -f "$fixture/checksums.txt.sig"
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
+                --release v0.0.0-test --base-url "$base" \
+                >"$sandbox/boot-nosig.log" 2>&1; then
+                fail "unsigned checksums accepted"
+        elif grep -q "UNSIGNED release artifacts" "$sandbox/boot-nosig.log"; then
+                pass "unsigned release refused (fail closed)"
+        else
+                fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-nosig.log")"
+        fi
+        sign_fixture release-sign.pem
+
+        # 0b. A signature from the WRONG key is refused.
+        sign_fixture wrong-sign.pem
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
+                --release v0.0.0-test --base-url "$base" \
+                >"$sandbox/boot-badsig.log" 2>&1; then
+                fail "wrong-key signature accepted"
+        elif grep -q "SIGNATURE VERIFICATION FAILED" "$sandbox/boot-badsig.log"; then
+                pass "wrong-key signature refused (fail closed)"
+        else
+                fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-badsig.log")"
+        fi
+        sign_fixture release-sign.pem
 
         # 1. A plain-HTTP release source is refused without the test escape.
         if env -u DREVANTA_BOOTSTRAP_ALLOW_HTTP "${env_pairs[0]}" \
@@ -619,6 +655,7 @@ test_bootstrap_installer() {
         cp "$sandbox/staged-drevantad" "$fixture/drevantad-linux-amd64"
         grep -v ' healthgate.sh$' "$fixture/checksums.txt" > "$fixture/checksums.partial"
         mv "$fixture/checksums.partial" "$fixture/checksums.txt"
+        sign_fixture release-sign.pem
         if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
                 --release v0.0.0-test --base-url "$base" \
                 >"$sandbox/boot-nosum.log" 2>&1; then
@@ -632,6 +669,7 @@ test_bootstrap_installer() {
         # 4. A missing artifact (404) aborts before anything is executed.
         ( cd "$fixture" && sha256sum drevantad-linux-amd64 install.sh drevanta.sh \
                 rollback.sh healthgate.sh > checksums.txt )
+        sign_fixture release-sign.pem
         rm -f "$fixture/rollback.sh"
         if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
                 --release v0.0.0-test --base-url "$base" \
@@ -643,9 +681,13 @@ test_bootstrap_installer() {
                 fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-404.log")"
         fi
 
-        # 5. Happy path: 'latest' resolved via the redirect, every artifact
-        #    verified, then the REAL install.sh runs from the staged payload.
+        # 5. Happy path: 'latest' resolved via the redirect, signature and
+        #    every artifact verified, then the REAL install.sh runs from the
+        #    staged payload.
         cp "$DEPLOY/rollback.sh" "$fixture/rollback.sh"
+        ( cd "$fixture" && sha256sum drevantad-linux-amd64 install.sh drevanta.sh \
+                rollback.sh healthgate.sh > checksums.txt )
+        sign_fixture release-sign.pem
         if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" --base-url "$base" \
                 >"$sandbox/boot-ok.log" 2>&1; then
                 pass "bootstrap install exit 0"
@@ -655,6 +697,8 @@ test_bootstrap_installer() {
         fi
         grep -q "resolving the latest published release" "$sandbox/boot-ok.log" \
                 && pass "latest release resolved via redirect" || fail "latest not resolved"
+        grep -q "signature verified against the official release key" "$sandbox/boot-ok.log" \
+                && pass "checksums signature verified" || fail "signature not verified"
         grep -q "integrity verified" "$sandbox/boot-ok.log" \
                 && pass "payload verified before execution" || fail "verification not logged"
         grep -q "is installed and running" "$sandbox/boot-ok.log" \

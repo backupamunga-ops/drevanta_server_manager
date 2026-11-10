@@ -1,6 +1,6 @@
-# Release publishing — prepared infrastructure, not yet used.
+# Release publishing — signed, verified artifacts.
 #
-# Pushing a tag (git tag v0.3.6 && git push origin v0.3.6) builds the
+# Pushing a tag (git tag v0.4.0 && git push origin v0.4.0) builds the
 # release payload exactly as deploy/bootstrap.sh expects it and publishes
 # a GitHub Release with these assets:
 #
@@ -10,12 +10,16 @@
 #   rollback.sh, healthgate.sh
 #   bootstrap.sh            the public one-command entry point
 #   checksums.txt           sha256 of every artifact above
+#   checksums.txt.sig       Ed25519 signature over checksums.txt, made
+#                           with the DREVANTA_RELEASE_SIGN_KEY secret —
+#                           bootstrap.sh refuses unsigned or wrongly
+#                           signed payloads (fail closed)
 #
-# No release exists yet and none is created by this file alone: publishing
-# happens only when a tag is pushed. Until the first tagged release is
-# published (and the repository or mirror is reachable publicly), the
-# one-command installation documented in docs/INSTALLATION.md stays
-# PLANNED — do not present it as working.
+# The signing key is provisioned by the operator: the PRIVATE key lives
+# only in the repository secret DREVANTA_RELEASE_SIGN_KEY (PEM), the
+# public half is committed at deploy/release-signing/drevanta-release.pub.pem
+# and embedded in bootstrap.sh. A release without the secret FAILS — we
+# never publish unsigned artifacts.
 name: release
 
 on:
@@ -27,14 +31,14 @@ permissions:
 
 jobs:
   publish:
-    name: Build, checksum and publish release
+    name: Build, sign, checksum and publish release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
 
       - uses: actions/setup-node@v4
         with:
@@ -64,6 +68,30 @@ jobs:
       - name: Verify payload round-trip (fail closed)
         run: (cd release && sha256sum -c checksums.txt)
 
+      - name: Sign checksums.txt (Ed25519, fail closed without the key)
+        env:
+          DREVANTA_RELEASE_SIGN_KEY: ${{ secrets.DREVANTA_RELEASE_SIGN_KEY }}
+        run: |
+          if [[ -z "$DREVANTA_RELEASE_SIGN_KEY" ]]; then
+            echo "ERROR: secret DREVANTA_RELEASE_SIGN_KEY is not configured." >&2
+            echo "The release policy forbids publishing unsigned artifacts." >&2
+            echo "Provision the release signing key (PEM) as a repository secret," >&2
+            echo "then re-run this workflow. See deploy/release-signing/README.md." >&2
+            exit 1
+          fi
+          printf '%s\n' "$DREVANTA_RELEASE_SIGN_KEY" > "$RUNNER_TEMP/sign.pem"
+          chmod 600 "$RUNNER_TEMP/sign.pem"
+          # Sanity: the key must match the committed public half.
+          openssl pkey -in "$RUNNER_TEMP/sign.pem" -pubout \
+            | diff -u - deploy/release-signing/drevanta-release.pub.pem \
+            || { echo "ERROR: signing key does not match the committed public key" >&2; exit 1; }
+          openssl pkeyutl -sign -inkey "$RUNNER_TEMP/sign.pem" -rawin \
+            -in release/checksums.txt -out release/checksums.txt.sig
+          openssl pkeyutl -verify -pubin \
+            -inkey deploy/release-signing/drevanta-release.pub.pem \
+            -rawin -in release/checksums.txt -sigfile release/checksums.txt.sig
+          rm -f "$RUNNER_TEMP/sign.pem"
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,4 +105,5 @@ jobs:
             release/rollback.sh \
             release/healthgate.sh \
             release/bootstrap.sh \
-            release/checksums.txt
+            release/checksums.txt \
+            release/checksums.txt.sig

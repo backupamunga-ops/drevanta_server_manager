@@ -16,18 +16,25 @@
 #   2. Downloads the release payload into a private temp directory:
 #        drevantad-linux-amd64, install.sh, drevanta.sh,
 #        rollback.sh, healthgate.sh, checksums.txt
-#   3. VERIFIES every artifact against checksums.txt — all-or-nothing,
-#      strictly before executing anything. Any mismatch, missing file or
-#      missing hash aborts with a non-zero exit and changes nothing.
+#   3. VERIFIES authenticity and integrity, all-or-nothing, strictly
+#      before executing anything:
+#        - checksums.txt must carry a valid Ed25519 signature made with
+#          the official Drevanta release key (embedded below); a missing
+#          signature, an unusable openssl, or a failed verification
+#          aborts with nothing changed;
+#        - every artifact must match its sha256 in the signed
+#          checksums.txt.
 #   4. Hands over to the existing, tested deploy/install.sh (no
 #      installation logic is duplicated here) with the staged binary.
 #
 # Security posture:
 #   - HTTPS only: downloads refuse non-HTTPS base URLs and refuse to
 #     follow a redirect that downgrades the protocol (--proto-redir).
+#   - Signed checksums: swapping an artifact AND its checksums is not
+#     enough — the checksums file must be signed by the release key.
 #   - No unverified execution: the only piped script is this bootstrap
 #     itself (TLS-authenticated from the official source); everything
-#     else is checksum-verified before it is run.
+#     else is signature- AND checksum-verified before it is run.
 #   - Verification errors always fail closed.
 #
 # Usage:
@@ -45,6 +52,9 @@
 #   DREVANTA_BOOTSTRAP_ALLOW_HTTP   set to 1 ONLY by the test harness to
 #                                   serve fixtures over plain-loopback HTTP;
 #                                   prints a loud warning when used
+#   DREVANTA_BOOTSTRAP_PUBKEY       Ed25519 public key (PEM) replacing the
+#                                   embedded one — TEST HARNESS ONLY, prints
+#                                   a loud warning; production never sets it
 #
 # Exit codes: 0 installed · 1 verification/download failure (nothing changed)
 #             · 2 usage error
@@ -75,6 +85,18 @@ usage() {
 }
 
 need_tool() { command -v "$1" >/dev/null 2>&1 || die "required tool '$1' not found"; }
+
+# The official Drevanta release signing key (Ed25519, PEM). The matching
+# private key exists ONLY in the release CI (GitHub Actions secret
+# DREVANTA_RELEASE_SIGN_KEY); see deploy/release-signing/.
+EMBEDDED_PUBKEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA+4Tm22+bmx8vVNSi50g2gcujlUyAxO/b37AywvCLXrA=
+-----END PUBLIC KEY-----'
+PUBKEY="$EMBEDDED_PUBKEY"
+if [[ -n "${DREVANTA_BOOTSTRAP_PUBKEY:-}" ]]; then
+        echo "WARNING: DREVANTA_BOOTSTRAP_PUBKEY is set — verifying against an OVERRIDE key (test harness only)" >&2
+        PUBKEY="$DREVANTA_BOOTSTRAP_PUBKEY"
+fi
 
 # ---------------------------------------------------------------------------
 # Arguments
@@ -170,6 +192,19 @@ for name in "${ARTIFACTS[@]}"; do
 done
 fetch "$DOWNLOAD_URL/checksums.txt" "$WORKDIR/checksums.txt" ||
         die "downloading checksums.txt failed — refusing to install unverified artifacts"
+
+# --- Authenticity: the checksums file must be signed by the release key ---
+need_tool openssl
+fetch "$DOWNLOAD_URL/checksums.txt.sig" "$WORKDIR/checksums.txt.sig" ||
+        die "downloading checksums.txt.sig failed — refusing UNSIGNED release artifacts (fail closed)"
+printf '%s\n' "$PUBKEY" > "$WORKDIR/release.pub.pem"
+if ! openssl pkeyutl -verify -pubin -inkey "$WORKDIR/release.pub.pem" \
+                -rawin -in "$WORKDIR/checksums.txt" -sigfile "$WORKDIR/checksums.txt.sig" \
+                > /dev/null 2>&1; then
+        error "SIGNATURE VERIFICATION FAILED for checksums.txt"
+        die "the release checksums are not signed with the official Drevanta release key — nothing was changed on this host"
+fi
+log "checksums.txt signature verified against the official release key"
 
 log "verifying release integrity"
 for name in "${ARTIFACTS[@]}"; do
