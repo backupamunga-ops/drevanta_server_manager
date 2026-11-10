@@ -4,6 +4,57 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.3.1-onboard-ux] — 2026-11-10
+
+Locked first-time installation UX: the claim token reaches the operator
+as a ready-to-open setup link in the installer output — no hidden files,
+no agent hand-off. Onboarding flow unchanged (design LOCKED).
+
+### Added
+- **Installer success screen** — after an interactive install the
+  installer prints the first-time-setup instructions: the SSH tunnel
+  command (real server address/username when the session provides them
+  via `SSH_CONNECTION`/`SUDO_USER`, clearly labelled `<placeholders>`
+  otherwise), the one-time setup link
+  `http://127.0.0.1:18080/onboarding#token=…`, and the raw token as a
+  fallback. Default claim-token TTL is now **30 minutes** (installer
+  `--ttl` / `drevantad claim init --ttl`).
+- **Setup-link prefill** — the onboarding page reads the token from the
+  URL fragment, fills the claim form, and immediately erases the fragment
+  from the address bar and the current history entry
+  (`history.replaceState`). Fragments never reach the server; the token
+  is read back via the Performance Navigation entry when the client
+  router replaces the URL before hydration. No analytics or external
+  scripts exist in the dashboard (`app.html` is dependency-free).
+- **`claim init` setup screen** — the CLI prints the same ready-to-open
+  setup link (raw token still line 1 of stdout, machine-parseable; screen
+  on stderr), so regeneration on the VPS produces the full UX.
+- **Installer token-delivery policy** — interactive sessions get the
+  screen; noninteractive runs (no TTY) never print the token and deliver
+  it via a root-owned 0600 file (`--token-file`, `$DREVANTA_TOKEN_FILE`,
+  or `/root/.drevanta-claim-token`). A re-run never rotates a live token
+  (`claim_token_active` is honoured); `DREVANTA_INTERACTIVE=1|0` is a
+  documented test hook.
+
+### Security
+- `store.CreateClaimTokenIfUnclaimed` — authoritative first-owner guard:
+  claim tokens can never be issued or regenerated once the instance is
+  claimed (`ErrAlreadyClaimed`).
+- Plaintext tokens appear only in the operator's own terminal; CI output,
+  systemd logs, and noninteractive captures never see them (harness
+  asserts both directions).
+
+### Tests
+- Installer harness: 49 → 80 assertions — interactive success screen,
+  real-vs-placeholder connection info, noninteractive file delivery
+  (0600, no token in output), no-reissue with a live token, `claim init`
+  screen/rotation via the real binary.
+- Go: `TestClaimTokenRegeneration` (rotate → old rejected → new claims →
+  replay 409), `TestCreateClaimTokenIfUnclaimed` (guard before/after
+  claim).
+- Web: `node --test` unit tests for fragment parsing, navigation-entry
+  fallback, and clean-URL building (8 tests); wired into CI.
+
 ## [0.2.2-sprint2] — 2026-11-10
 
 Secure installer and first-owner onboarding. The product is now

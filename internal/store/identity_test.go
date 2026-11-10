@@ -289,3 +289,37 @@ func TestUserCRUDAndMFAFields(t *testing.T) {
 		t.Fatalf("replay guard step: %d", u.MFALastStep)
 	}
 }
+
+// TestCreateClaimTokenIfUnclaimed pins the first-owner guard behind
+// `drevantad claim init`: issuance works only while unclaimed and is
+// refused forever afterwards.
+func TestCreateClaimTokenIfUnclaimed(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.Migrate(ctx)
+
+	if _, err := s.CreateClaimTokenIfUnclaimed(ctx, "hash-while-unclaimed", time.Hour); err != nil {
+		t.Fatalf("issue while unclaimed: %v", err)
+	}
+
+	// Become claimed (a real admin row is required by the FK).
+	admin, err := s.CreateUser(ctx, "owner", "$argon2id$hash")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := s.ClaimInstance(ctx, admin.ID); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := s.FinishOnboarding(ctx, "totp"); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	if _, err := s.CreateClaimTokenIfUnclaimed(ctx, "hash-after-claim", time.Hour); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("issue after claim: err=%v, want ErrAlreadyClaimed", err)
+	}
+	// The refused token hash must not have been stored.
+	if _, err := s.ClaimTokenByHash(ctx, "hash-after-claim"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("refused token was stored: %v", err)
+	}
+}

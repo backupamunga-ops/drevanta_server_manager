@@ -479,3 +479,41 @@ func currentTOTP(t *testing.T, secret string) string {
 	}
 	return code
 }
+
+// TestClaimTokenRegeneration pins the locked regeneration semantics end to
+// end: rotating before the claim invalidates the previous token, the new
+// token claims exactly once, and a consumed token is rejected on replay.
+func TestClaimTokenRegeneration(t *testing.T) {
+	h, st := newTestHandler(t)
+	ctx := context.Background()
+
+	first, _, _ := auth.NewToken()
+	if _, err := st.CreateClaimToken(ctx, auth.TokenHash(first), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// Authorized regeneration BEFORE any claim: rotation revokes the first.
+	second, _, _ := auth.NewToken()
+	if _, err := st.CreateClaimToken(ctx, auth.TokenHash(second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	body := func(tok, user string) string {
+		return fmt.Sprintf(`{"token":%q,"username":%q,"password":"correct horse battery"}`, tok, user)
+	}
+
+	// The rotated-out token is refused with the generic invalid_token reason.
+	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim", body(first, "attacker"), nil)
+	if rec.Code != http.StatusUnauthorized || errCode(decodeMap(t, rec)) != "invalid_token" {
+		t.Fatalf("rotated-out token: %d %v", rec.Code, decodeMap(t, rec))
+	}
+	// The current token claims successfully.
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim", body(second, "admin"), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim with rotated-in token = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Replay of the now-consumed token is rejected (wrong state: claimed).
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim", body(second, "eve"), nil)
+	if rec.Code != http.StatusConflict || errCode(decodeMap(t, rec)) != "wrong_state" {
+		t.Fatalf("replay after claim: %d %v", rec.Code, decodeMap(t, rec))
+	}
+}

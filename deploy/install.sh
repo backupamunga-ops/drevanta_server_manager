@@ -34,8 +34,10 @@ SERVICE_NAME="${DREVANTA_SERVICE_NAME:-drevanta}"
 RUNUSER="${DREVANTA_RUNUSER:-runuser}"   # empty string disables privilege drop (tests)
 DAEMON_USER="${DREVANTA_DAEMON_USER:-drevanta}"
 PORT="${DREVANTA_PORT:-8080}"
-CLAIM_TTL="${DREVANTA_CLAIM_TTL:-24h}"
+CLAIM_TTL="${DREVANTA_CLAIM_TTL:-30m}"
 BIND_ADDR="${DREVANTA_BIND_ADDR:-127.0.0.1}"
+# Local port of the documented SSH tunnel (locked first-time-setup UX).
+TUNNEL_LOCAL_PORT="${DREVANTA_TUNNEL_LOCAL_PORT:-18080}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_BINARY="${SCRIPT_DIR}/../dist/drevantad-linux-amd64"
@@ -470,46 +472,151 @@ start_and_verify() {
         info "service active and /readyz reports ready"
 }
 
+# ---------------------------------------------------------------------------
+# Token delivery policy (locked first-time-setup UX)
+# ---------------------------------------------------------------------------
+# Interactive session  -> the full one-time setup screen (link + raw token)
+#                        is printed to the operator's own terminal.
+# Noninteractive (CI, pipes, automation) -> the token is NEVER printed;
+#                        it is delivered via a root-owned 0600 file.
+# DREVANTA_INTERACTIVE=1|0 overrides the TTY probe (test hook).
+is_interactive() {
+        case "${DREVANTA_INTERACTIVE:-auto}" in
+                1|true|yes) return 0 ;;
+                0|false|no) return 1 ;;
+                *) [[ -t 1 ]] ;;
+        esac
+}
+
+# ssh_hint prints "<ip> <user>" - the server address and SSH username of
+# the current session when reliably known (SSH_CONNECTION / SUDO_USER),
+# otherwise empty fields. A missing value becomes a clearly labelled
+# placeholder downstream, never a guess.
+ssh_hint() {
+        local ip="" user=""
+        if [[ -n "${DREVANTA_SSH_HOST:-}" ]]; then
+                ip="$DREVANTA_SSH_HOST"
+        elif [[ -n "${SSH_CONNECTION:-}" ]]; then
+                ip="$(printf '%s' "$SSH_CONNECTION" | awk '{print $3}')"
+        fi
+        if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+                user="$SUDO_USER"
+        elif [[ -n "$ip" ]] && [[ "$(id -u 2>/dev/null || echo 1)" == "0" ]]; then
+                user="root"   # this session IS root over SSH - known, not guessed
+        fi
+        printf '%s %s' "$ip" "$user"
+}
+
+print_success_screen() {
+        local token="$1" target_file="$2"
+        local ttl_disp="$CLAIM_TTL"
+        [[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
+
+        local hint ip user disp_ip disp_user note=""
+        hint="$(ssh_hint)"
+        ip="${hint%% *}"
+        user="${hint#* }"
+        disp_ip="$ip"; [[ -z "$disp_ip" ]] && disp_ip="<your-vps-ip>"
+        disp_user="$user"; [[ -z "$disp_user" ]] && disp_user="<ssh-user>"
+        if [[ -z "$ip" || -z "$user" ]]; then
+                note="  (replace the placeholder with this server's address and your SSH user)"
+        fi
+        local link="http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding#token=${token}"
+
+        cat <<EOF
+
+✓ DREVANTA INSTALLED SUCCESSFULLY
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Welcome to Drevanta!
+
+  Your server is ready for first-time setup.
+
+  STEP 1 - On your computer, run:
+
+  ssh -N -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${PORT} ${disp_user}@${disp_ip}
+
+  STEP 2 - Open this link:
+
+  ${link}
+
+  Token expires in ${ttl_disp}.
+  This link can be used only once.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Raw token (fallback): ${token}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+        if [[ -n "$note" ]]; then
+                printf '%s\n' "$note"
+        fi
+        if [[ -n "$target_file" ]]; then
+                info "a copy is also saved root-only: $target_file - delete it after onboarding"
+        fi
+}
+
 issue_claim_token() {
         STEP="claim token"
         local token_file="$1"
         local status version
         status="$(http_get "http://${BIND_ADDR}:${PORT}/api/v1/onboarding/status" || echo "")"
-        if [[ "$status" != *'"instance_status":"unclaimed"'* ]]; then
-                info "instance already claimed — no claim token needed"
+        if [[ "$status" == *'"instance_status":"active"'* || "$status" == *'"instance_status":"mfa_pending"'* ]]; then
+                info "instance already claimed - no claim token needed"
+                info "sign in via the tunnel: http://127.0.0.1:${TUNNEL_LOCAL_PORT}/login"
+                return 0
+        fi
+        if [[ "$status" == *'"claim_token_active":true'* ]]; then
+                info "an active claim token already exists - it is NOT re-issued"
+                info "(re-issuing would rotate and invalidate it). Open"
+                info "http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding and paste it, or rotate on purpose with:"
+                info "  sudo -u $DAEMON_USER $OPT_DIR/current/drevantad claim init --data-dir $STATE_DIR"
                 return 0
         fi
 
         version="$(bin_version "$OPT_DIR/current/drevantad")"
         local claim_cmd=( "$OPT_DIR/current/drevantad" claim init --data-dir "$STATE_DIR" --ttl "$CLAIM_TTL" )
-        local raw
+        local raw errfile
+        errfile="$(mktemp)"
         if [[ -n "$RUNUSER" ]]; then
-                raw="$("$RUNUSER" -u "$DAEMON_USER" -- "${claim_cmd[@]}")"
+                # claim init prints the raw token on stdout (captured) and its
+                # own setup screen on stderr (captured separately: the installer
+                # renders the screen itself, so the two never double-print).
+                if ! raw="$($RUNUSER -u "$DAEMON_USER" -- "${claim_cmd[@]}" 2>"$errfile")"; then
+                        error "claim init failed:"
+                        sed 's/^/    /' "$errfile" >&2
+                        rm -f "$errfile"
+                        die "could not issue claim token"
+                fi
         else
                 raw="${claim_cmd[*]}"          # test mode
         fi
+        rm -f "$errfile"
         local token
         token="$(printf '%s' "$raw" | head -n1 | tr -d '[:space:]')"
         [[ -n "$token" ]] || die "claim init produced no token"
 
-        if [[ -n "$token_file" ]]; then
+        # Delivery channel: interactive terminal and/or protected file.
+        local target_file="$token_file"
+        if ! is_interactive && [[ -z "$target_file" ]]; then
+                target_file="${DREVANTA_TOKEN_FILE:-/root/.drevanta-claim-token}"
+        fi
+        if [[ -n "$target_file" ]]; then
                 umask 077
-                printf '%s\n' "$token" > "$token_file"
+                printf '%s\n' "$token" > "$target_file"
                 umask 022
-                info "claim token written to $token_file (mode 0600, shown once below)"
+                chmod 600 "$target_file" 2>/dev/null || true
         fi
-        echo
-        echo "======================================================================="
-        echo "  FIRST-OWNER CLAIM TOKEN (valid for ${CLAIM_TTL}, single use):"
-        echo "    ${token:0:10}…${token: -4}"
-        if [[ -z "$token_file" ]]; then
-                echo "  (full token above was printed to stdout once; re-run with"
-                echo "   --token-file PATH to store it, or 'drevantad claim init')"
+
+        if is_interactive; then
+                print_success_screen "$token" "$target_file"
+        else
+                info "noninteractive install: claim token written to $target_file (mode 0600)"
+                info "retrieve it with: sudo cat $target_file"
+                info "then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding (via SSH tunnel) and paste it"
         fi
-        echo
-        echo "  Onboard at:  http://127.0.0.1:${PORT}/onboarding   (via SSH tunnel)"
-        echo "======================================================================="
-        echo
 }
 
 summary() {
@@ -518,9 +625,6 @@ summary() {
         info "service:    systemctl status $SERVICE_NAME"
         info "release:    $OPT_DIR/releases/$version"
         info "endpoint:   http://${BIND_ADDR}:${PORT}  (loopback only)"
-        info "tunnel:     ssh -N -L 18080:127.0.0.1:${PORT} root@HOST"
-        info "dashboard:  http://127.0.0.1:18080/   (then /onboarding for a fresh install)"
-        info "claim CLI:  sudo -u $DAEMON_USER $OPT_DIR/current/drevantad claim status"
 }
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,10 @@ const (
 // ErrNotFound is returned when a queried row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrAlreadyClaimed is returned by CreateClaimTokenIfUnclaimed when token
+// issuance is attempted after the first owner exists.
+var ErrAlreadyClaimed = errors.New("instance already claimed")
+
 // User is one operator account.
 type User struct {
 	ID           int64
@@ -298,6 +302,21 @@ INSERT INTO claim_tokens (token_hash, created_at, expires_at) VALUES (?, ?, ?)`,
 	}
 	ct = ClaimToken{ID: id, TokenHash: tokenHash, CreatedAt: now, ExpiresAt: exp}
 	return ct, nil
+}
+
+// CreateClaimTokenIfUnclaimed issues a claim token only while the
+// instance is still unclaimed. This is the authoritative guard behind
+// `drevantad claim init`: once the first owner exists, claim tokens can
+// never be issued or regenerated — there is no path back to unclaimed.
+func (s *Store) CreateClaimTokenIfUnclaimed(ctx context.Context, tokenHash string, ttl time.Duration) (ClaimToken, error) {
+	st, err := s.InstanceState(ctx)
+	if err != nil {
+		return ClaimToken{}, fmt.Errorf("check instance state: %w", err)
+	}
+	if st.Status != StatusUnclaimed {
+		return ClaimToken{}, ErrAlreadyClaimed
+	}
+	return s.CreateClaimToken(ctx, tokenHash, ttl)
 }
 
 // ActiveClaimToken returns the currently valid (unconsumed, unrevoked,

@@ -198,8 +198,94 @@ test_install_fresh_and_claim() {
         [[ "$(stat -c '%a' "$sandbox/claim.txt")" == "600" ]] && pass "token file mode 0600" || fail "token mode: $(stat -c '%a' "$sandbox/claim.txt")"
         "$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null | grep -q "claim_token_active=true" \
                 && pass "token stored hashed in daemon DB" || fail "token not in DB"
-        grep -qE "drv1_[A-Za-z0-9_-]{5}…[A-Za-z0-9_-]{4}" "$sandbox/install.log" && pass "stdout shows masked token only" || fail "token not masked in stdout"
-        if grep -qE "drv1_[A-Za-z0-9_-]{39,}" "$sandbox/install.log"; then fail "FULL token leaked to stdout"; else pass "full token not printed to stdout"; fi
+        # Noninteractive run: the token must appear NOWHERE in the output.
+        if grep -q "drv1_" "$sandbox/install.log"; then fail "token leaked to noninteractive stdout"; else pass "no token in noninteractive stdout"; fi
+        grep -q "noninteractive install: claim token written to" "$sandbox/install.log" \
+                && pass "noninteractive file delivery reported" || fail "no file-delivery message"
+}
+
+test_interactive_success_screen() {
+        section "interactive install: locked first-time-setup screen"
+        rm -f "$MOCK_STATUS_FILE"   # back to unclaimed, no active token
+        DREVANTA_INTERACTIVE=1 "$DEPLOY/install.sh" install \
+                --binary "$sandbox/staged-drevantad" >"$sandbox/install_tty.log" 2>&1
+        local rc=$?
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_tty.log"; return; }
+        grep -q "DREVANTA INSTALLED SUCCESSFULLY" "$sandbox/install_tty.log" && pass "success headline" || fail "no headline"
+        grep -q "Welcome to Drevanta!" "$sandbox/install_tty.log" && pass "welcome copy" || fail "no welcome"
+        grep -qE "ssh -N -L 18080:127\.0\.0\.1:8080 <ssh-user>@<your-vps-ip>" "$sandbox/install_tty.log" \
+                && pass "tunnel command with labelled placeholders (unknown session)" || fail "tunnel line wrong"
+        local link_token
+        link_token="$(grep -oE 'http://127\.0\.0\.1:18080/onboarding#token=[A-Za-z0-9_-]+' "$sandbox/install_tty.log" | head -n1 | sed 's/.*#token=//')"
+        if [[ "$link_token" =~ ^drv1_[A-Za-z0-9_-]{43}$ ]]; then pass "prefilled onboarding link with full token"; else fail "link token malformed: '$link_token'"; fi
+        grep -q "Raw token (fallback): $link_token" "$sandbox/install_tty.log" && pass "raw token fallback matches link" || fail "fallback token missing/mismatched"
+        grep -q "Token expires in 30 minutes." "$sandbox/install_tty.log" && pass "30-minute default TTL stated" || fail "TTL copy wrong"
+        grep -q "This link can be used only once." "$sandbox/install_tty.log" && pass "single-use note" || fail "no single-use note"
+        grep -q "replace the placeholder" "$sandbox/install_tty.log" && pass "placeholder explained" || fail "no placeholder note"
+        # The screen IS the delivery channel here: no silent extra file.
+        grep -q "a copy is also saved root-only" "$sandbox/install_tty.log" && fail "unexpected token file" || pass "no token file without --token-file"
+        # The token in the link must be the one stored hashed in the DB.
+        "$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null | grep -q "claim_token_active=true" \
+                && pass "screen token is the live DB token" || fail "token not active in DB"
+}
+
+test_interactive_uses_real_connection_info() {
+        section "interactive install: real SSH session info when known"
+        rm -f "$MOCK_STATUS_FILE"
+        DREVANTA_INTERACTIVE=1 DREVANTA_SSH_HOST="203.0.113.7" SUDO_USER="" SSH_CONNECTION="198.51.100.9 51000 203.0.113.7 22" \
+                "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_conn.log" 2>&1
+        local rc=$?
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_conn.log"; return; }
+        grep -q "ssh -N -L 18080:127.0.0.1:8080 root@203.0.113.7" "$sandbox/install_conn.log" \
+                && pass "server IP + root taken from the real SSH session" || fail "connection info not used"
+        if grep -q "<your-vps-ip>" "$sandbox/install_conn.log"; then fail "placeholder used despite known IP"; else pass "no placeholder when known"; fi
+}
+
+test_noninteractive_default_token_file() {
+        section "noninteractive install: protected default token file"
+        rm -f "$MOCK_STATUS_FILE"
+        rm -f "$sandbox/state/claim-default.txt"
+        DREVANTA_INTERACTIVE=0 DREVANTA_TOKEN_FILE="$sandbox/state/claim-default.txt" \
+                "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_ni.log" 2>&1
+        local rc=$?
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_ni.log"; return; }
+        [[ -s "$sandbox/state/claim-default.txt" ]] && pass "default token file written" || fail "no default token file"
+        [[ "$(stat -c '%a' "$sandbox/state/claim-default.txt")" == "600" ]] && pass "default token file 0600" || fail "wrong mode"
+        if grep -q "drv1_" "$sandbox/install_ni.log"; then fail "token leaked in noninteractive mode"; else pass "no token in noninteractive output"; fi
+        grep -q "sudo cat $sandbox/state/claim-default.txt" "$sandbox/install_ni.log" && pass "retrieval instructions shown" || fail "no retrieval hint"
+        if grep -q "DREVANTA INSTALLED SUCCESSFULLY" "$sandbox/install_ni.log"; then fail "interactive screen shown noninteractively"; else pass "no success screen in noninteractive mode"; fi
+}
+
+test_no_reissue_when_token_active() {
+        section "re-run with a live claim token does not rotate it"
+        echo '{"instance_status":"unclaimed","mfa_mode":"","claim_token_active":true,"authenticated":false}' > "$MOCK_STATUS_FILE"
+        local before after
+        before="$("$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null)"
+        DREVANTA_INTERACTIVE=0 "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_keep.log" 2>&1 \
+                && pass "exit 0" || fail "non-zero exit"
+        grep -q "it is NOT re-issued" "$sandbox/install_keep.log" && pass "rotation explicitly refused" || fail "no keep-token message"
+        if grep -q "claim token written to" "$sandbox/install_keep.log"; then fail "a new token was issued anyway"; else pass "no new token issued"; fi
+        after="$("$sandbox/opt/current/drevantad" claim status --data-dir "$sandbox/state" 2>/dev/null)"
+        [[ "$before" == "$after" ]] && pass "token state untouched" || fail "token state changed: $before -> $after"
+}
+
+test_claim_init_cli_screen() {
+        section "claim init CLI: raw token on stdout, setup screen on stderr"
+        local out err tok
+        out="$("$sandbox/opt/current/drevantad" claim init --data-dir "$sandbox/state" 2>"$sandbox/claim_err.log")"
+        err="$(cat "$sandbox/claim_err.log")"
+        tok="$(printf '%s' "$out" | head -n1)"
+        [[ "$tok" =~ ^drv1_[A-Za-z0-9_-]{43}$ ]] && pass "stdout line 1 is the raw token" || fail "stdout token malformed: '$tok'"
+        printf '%s' "$err" | grep -q "CLAIM TOKEN ISSUED" && pass "screen headline on stderr" || fail "no screen headline"
+        printf '%s' "$err" | grep -q "http://127.0.0.1:18080/onboarding#token=$tok" && pass "setup link matches stdout token" || fail "link mismatch"
+        printf '%s' "$err" | grep -q "Raw token (fallback): $tok" && pass "raw fallback present" || fail "no fallback"
+        printf '%s' "$err" | grep -q "Token expires in 30 minutes." && pass "30-minute default TTL" || fail "TTL copy wrong"
+        printf '%s' "$err" | grep -q "<your-vps-ip>" && pass "placeholder when session unknown" || fail "placeholder missing"
+        # Rotation on purpose: a second init succeeds while unclaimed and the
+        # newest token is the only active one (store semantics covered in Go).
+        local tok2
+        tok2="$("$sandbox/opt/current/drevantad" claim init --data-dir "$sandbox/state" 2>/dev/null | head -n1)"
+        [[ "$tok2" =~ ^drv1_ && "$tok2" != "$tok" ]] && pass "authorized regeneration issues a fresh token" || fail "regeneration broken"
 }
 
 test_install_idempotent() {
@@ -314,6 +400,11 @@ main() {
         test_preflight_fail_arch
         test_preflight_fail_port
         test_install_fresh_and_claim
+        test_interactive_success_screen
+        test_interactive_uses_real_connection_info
+        test_noninteractive_default_token_file
+        test_no_reissue_when_token_active
+        test_claim_init_cli_screen
         test_install_idempotent
         test_install_upgrade_and_autorollback
         test_rollback_script

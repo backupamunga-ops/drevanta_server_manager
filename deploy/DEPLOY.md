@@ -24,12 +24,27 @@ Stage `dist/drevantad-linux-amd64` and the `deploy/` scripts on the host
 
 ```sh
 sudo install.sh preflight              # optional: checks only, changes nothing
-sudo install.sh install \
-     --binary /root/staging/drevantad \
-     --token-file /root/.drevanta-claim-token \
-     --ttl 24h
+sudo install.sh install --binary /root/staging/drevantad
 sudo install.sh --uninstall            # remove; add --purge to wipe state
 ```
+
+### First-time setup screen (locked UX)
+
+After a successful **interactive** installation the installer prints the
+one-time setup screen: the SSH tunnel command (real server address when
+the session provides it, clearly labelled `<placeholders>` otherwise), a
+ready-to-open `http://127.0.0.1:18080/onboarding#token=…` link with the
+claim token embedded, and the raw token as fallback. The token expires
+after **30 minutes** by default (`--ttl` to change) and is consumed only
+by a successful claim — opening the link never consumes it. The
+onboarding page prefills the token from the URL fragment and immediately
+strips the fragment from the address bar and history.
+
+**Noninteractive** runs (CI, pipes, automation — no TTY) never print the
+token: it is delivered via a root-owned 0600 file — `--token-file PATH`,
+then `$DREVANTA_TOKEN_FILE`, then `/root/.drevanta-claim-token` — and the
+output only names that file. An existing active claim token is never
+re-issued by a re-run (re-issuing would rotate and invalidate it).
 
 What the installer does, in order:
 
@@ -52,15 +67,17 @@ What the installer does, in order:
    10 s. On failure: journal excerpt is printed and the symlink is
    **automatically rolled back** to the previous release, restarted, and
    re-verified (safe failure / recovery).
-5. **Claim token** — only for a fresh (unclaimed) instance: runs
-   `drevantad claim init` as the `drevanta` user, stores the token in
-   `--token-file` (mode 0600) and prints it **masked** to stdout. The
-   token is single-use, expiring, and stored hashed server-side.
-6. **Summary** — service state, release, tunnel and onboarding URLs.
+5. **Claim token** — only for a fresh (unclaimed) instance with no live
+   token: runs `drevantad claim init` as the `drevanta` user (default TTL
+   30 minutes) and prints the locked setup screen (interactive) or writes
+   a 0600 token file (noninteractive). The token is single-use, expiring,
+   and stored hashed server-side.
+6. **Summary** — service state, release, loopback endpoint.
 
 Idempotency: re-running with the same release + unit is a verified
 no-op (the daemon is **not** restarted); a new release upgrades with
-automatic rollback; a claimed instance is not re-issued a token.
+automatic rollback; a claimed instance is not re-issued a token; an
+unclaimed instance with a live token keeps that token (no rotation).
 
 ## Operator access (SSH tunnel)
 
@@ -69,10 +86,16 @@ ssh -N -L 18080:127.0.0.1:8080 root@HOST
 # open http://127.0.0.1:18080/
 ```
 
-- Fresh instance → redirected to `/onboarding`: paste the claim token,
-  create the administrator account, enrol TOTP MFA (QR + manual secret)
-  and store the 10 single-use recovery codes — or skip MFA with an
-  explicit, audited risk acknowledgement.
+- Fresh install (interactive) → the installer screen already contains the
+  ready-to-open `#token=` link; open it and the token field prefills.
+- Token expired or lost? Regenerate on the VPS — one command, prints the
+  setup link once and rotates out any previous token:
+
+```sh
+runuser -u drevanta -- /opt/drevanta/current/drevantad claim init \
+        --data-dir /var/lib/drevanta
+```
+
 - Later visits → `/login` (password + authenticator code, or a recovery
   code if the authenticator is lost).
 
