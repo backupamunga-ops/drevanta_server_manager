@@ -168,3 +168,12 @@ SQLite database at `/var/lib/drevanta/drevanta.db` (WAL mode) with:
 See `docs/ARCHITECTURE.md` for the as-built design and
 `docs/BENCHMARKS.md` for measured memory consumption on the target-class
 VPS.
+
+## License
+
+Drevanta is proprietary software — see [LICENSE](LICENSE) for the terms.
+Public visibility of this repository does not grant any license to
+redistribute or relicense the Software. You may install and evaluate the
+release artifacts on servers you own or control under the evaluation grant
+in [LICENSE](LICENSE); any other use requires written permission from the
+copyright holder.

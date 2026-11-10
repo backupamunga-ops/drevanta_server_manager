@@ -1,0 +1,44 @@
+DREVANTA — PROPRIETARY SOFTWARE NOTICE
+======================================
+
+Copyright (c) 2026 Drevanta / backupamunga-ops. All rights reserved.
+
+This software and its source code, build scripts, documentation, release
+artifacts, and all related materials (collectively, the "Software") are
+the proprietary property of the copyright holder.
+
+NO OPEN-SOURCE LICENSE
+----------------------
+The Software is not provided under any open-source license (MIT,
+Apache-2.0, GPL, or otherwise). The fact that this repository is visible
+on GitHub does NOT grant, and shall not be construed as granting, any
+right or license to reproduce, distribute, publish, sublicense, sell,
+modify, or create derivative works of the Software, in source or binary
+form, except as expressly stated below.
+
+EVALUATION AND INSTALLATION GRANT
+---------------------------------
+You may download the official release artifacts from this repository's
+releases page and install and run the Software on servers you own or
+control, solely to evaluate its suitability for your own use
+("Evaluation Use"). Any use beyond Evaluation Use — including
+redistribution of the installer or release artifacts, production
+deployment at scale, or incorporation into another product or service —
+requires a separate written agreement with the copyright holder.
+
+NO WARRANTY
+-----------
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR ITS USE.
+
+THIRD-PARTY COMPONENTS
+----------------------
+Third-party components vendored or referenced by the Software remain
+under their own respective licenses (see go.mod, web/package-lock.json,
+and each upstream project).
+
+Contact: ops@backupamunga-ops.dev

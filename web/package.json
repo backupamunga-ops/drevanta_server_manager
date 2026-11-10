@@ -2,6 +2,7 @@
         "name": "drevanta-dashboard",
         "version": "0.1.0",
         "private": true,
+        "license": "UNLICENSED",
         "type": "module",
         "scripts": {
                 "prepare": "svelte-kit sync || echo ''",
