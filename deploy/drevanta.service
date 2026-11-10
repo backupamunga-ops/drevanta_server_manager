@@ -1,0 +1,54 @@
+# drevanta.service — dedicated unprivileged systemd service for drevantad.
+# Installed to /etc/systemd/system/drevanta.service.
+#
+# Hardening posture (Sprint 1): no capabilities, read-only filesystems
+# except the state directory, no new privileges, no /tmp sharing, no
+# device access, filtered syscall surface, 256 MiB memory ceiling.
+
+[Unit]
+Description=Drevanta server management daemon
+Documentation=https://github.com/backupamunga-ops/drevanta_server_manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drevanta
+Group=drevanta
+ExecStart=/opt/drevanta/drevantad --addr 127.0.0.1:8080 --data-dir /var/lib/drevanta
+Restart=on-failure
+RestartSec=3s
+
+# --- Resource limits (512 MB-class VPS budget) ---
+MemoryMax=256M
+MemoryHigh=192M
+TasksMax=64
+LimitNOFILE=4096
+
+# --- Filesystem isolation ---
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StateDirectory=drevanta
+
+# --- Privilege / kernel surface ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

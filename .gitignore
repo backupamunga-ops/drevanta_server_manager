@@ -1,0 +1,18 @@
+# Secrets must never live inside this work tree (they live in an external
+# .secrets directory; this rule is defense in depth).
+.secrets/
+
+# Build artifacts
+/bin/
+/dist/
+/web/node_modules/
+/web/build/*
+!/web/build/.gitkeep
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Toolchains / caches (sandbox-local only)
+/.toolchain/
