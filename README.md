@@ -9,19 +9,27 @@ binds to loopback only and is reached through an SSH tunnel.
 > ## 📘 First time installing Drevanta?
 > **Start with the step-by-step guide:
 > [docs/INSTALLATION.md](docs/INSTALLATION.md)** — written for first-time
-> VPS owners: one-command install, the one-time setup link, tunnel setup
-> (Windows PowerShell & Linux/macOS), creating the administrator, MFA,
-> and troubleshooting. You will not need anything else from this README
-> to get running.
+> VPS owners: connect over SSH, install, the one-time setup link, tunnel
+> setup (Windows PowerShell & Linux/macOS), creating the administrator,
+> MFA, and troubleshooting. You will not need anything else from this
+> README to get running.
+>
+> 🛠️ **Building, transferring artifacts, or contributing?** See
+> [For Developers — Manual Installation & Building from Source](docs/INSTALLATION.md#for-developers--manual-installation--building-from-source)
+> in the same guide — that is where cloning, cross-compilation, SCP and
+> running `deploy/install.sh` directly are documented.
 
-**Status:** Sprint 2.6 — secure installer, first-owner onboarding, and a
-one-command fallback (`sudo drevanta claim regenerate`) for lost or
-expired setup links. A host is set up with one verified command; the
-first person to present the single-use claim token becomes the
-administrator through a browser wizard (credentials, TOTP MFA with
-recovery codes, or an explicit, audited MFA skip). Sprint 1's daemon,
-API, dashboard, SQLite audit store, hardened systemd service, CI, and
-deployment are unchanged in spirit and preserved.
+**Status:** Sprint 2.7 — the approved onboarding UI/UX is implemented,
+and the SSH-first installation journey is documented with the
+one-command installer **planned** (it activates when official release
+hosting goes live; no installation URL is functional yet). Today a host
+is set up with the temporary development procedure: a verified build is
+transferred to the server and `deploy/install.sh` runs there. The first
+person to present the single-use claim token becomes the administrator
+through a browser wizard (credentials, TOTP MFA with recovery codes, or
+an explicit, audited MFA skip). Sprint 1's daemon, API, dashboard,
+SQLite audit store, hardened systemd service, CI, and deployment are
+unchanged in spirit and preserved.
 
 ## Security model (Sprint 1)
 
@@ -53,12 +61,20 @@ Then open `http://127.0.0.1:8080/` — a fresh instance redirects you to
 the onboarding wizard. Run `bin/drevantad claim init --data-dir
 /tmp/drevanta-dev` once to get a claim token (printed once).
 
-## Install on a server (one command)
+## Install on a server (temporary development procedure)
+
+Until official release hosting is live, installing means building (or
+obtaining) the release artifacts and staging them on the target host —
+the full commands are in the guide's
+[developer section](docs/INSTALLATION.md#for-developers--manual-installation--building-from-source).
+In short:
 
 ```sh
 make cross-linux-amd64                 # dist/drevantad-linux-amd64
-sudo deploy/install.sh                 # preflight + install + start + verify
-sudo deploy/install.sh preflight       # checks only, changes nothing
+scp dist/drevantad-linux-amd64 deploy/*.sh root@YOUR_VPS_IP:/root/
+ssh root@YOUR_VPS_IP
+sudo bash install.sh install --binary /root/drevantad-linux-amd64
+sudo bash install.sh preflight        # checks only, changes nothing
 ```
 
 The installer prints the ready-to-open, single-use setup link (token
@@ -71,10 +87,13 @@ sudo drevanta claim regenerate         # fresh one-time setup link, invalidates 
 sudo drevanta claim status             # onboarding state (no secrets)
 ```
 
-Full walkthrough for first-time VPS owners: `docs/INSTALLATION.md`.
-Re-running the installer is always safe (idempotent; upgrades roll back
-automatically if `/readyz` fails; `--skip-claim` defers token handling
-entirely).
+The public one-command installer (`deploy/bootstrap.sh`) is implemented
+and harness-tested but **not published**: it activates together with the
+first tagged release (the release workflow publishes its verified
+payload automatically). Full walkthrough for first-time VPS owners:
+`docs/INSTALLATION.md`. Re-running the installer is always safe
+(idempotent; upgrades roll back automatically if `/readyz` fails;
+`--skip-claim` defers token handling entirely).
 
 ## Accessing the deployed dev instance
 
@@ -120,8 +139,8 @@ internal/httpapi/    frozen API surface + middleware (recovery, logging)
 internal/metrics/    on-demand /proc + statfs collectors (pure stdlib)
 internal/store/      SQLite (modernc.org/sqlite, no CGO): migrations + audit log
 web/                 SvelteKit dashboard (adapter-static) + go:embed package
-deploy/              systemd unit + deployment runbook
-docs/                as-built architecture, benchmarks
+deploy/              installer, bootstrap, systemd unit + deployment runbook
+docs/                as-built architecture, benchmarks, installation guide
 ```
 
 ## Storage

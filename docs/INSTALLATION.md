@@ -2,8 +2,9 @@
 
 This guide is written for someone who has just rented a VPS (a small
 Linux server in the cloud) and wants Drevanta running on it. You do
-**not** need to be a professional system administrator. Every command
-you need is written out in full. By the end you will have:
+**not** need to be a professional system administrator, and you do
+**not** need Docker, a web server, a domain name, TLS certificates, or
+any open port besides SSH (22). By the end you will have:
 
 1. installed Drevanta with **one command**,
 2. received a **one-time setup link** in your terminal,
@@ -11,15 +12,38 @@ you need is written out in full. By the end you will have:
 4. configured two-factor authentication (MFA), and
 5. reached your dashboard.
 
+> **Installation status — read this first (updated 2026-11-10).**
+> Drevanta is in active development and its releases are not publicly
+> hosted yet, so the one-command installer below is **planned, not live**:
+> no installation URL is functional today, and no release artifacts
+> exist to download. Until the first official release is announced, a
+> host is set up with the **temporary development procedure** — a
+> verified build is transferred to the server and the same tested
+> installer is run — which is documented in
+> [For Developers — Manual Installation & Building from Source](#for-developers--manual-installation--building-from-source).
+> Every other step in this guide (tunnel, setup link, account, MFA,
+> dashboard) is identical either way.
+
 > **Good to know before you start:** Drevanta's dashboard is deliberately
 > *not* on the public internet. It listens only on the server itself
 > (`127.0.0.1:8080`), and you reach it through an encrypted SSH tunnel —
 > the same channel you are already using to administer the server.
-> Section 13 explains why this is a feature, not a limitation.
+> [Why loopback-only](#why-drevanta-only-listens-on-loopback-the-default-by-design)
+> explains why this is a feature, not a limitation.
 
----
+## The journey at a glance
 
-## 1. VPS prerequisites and supported operating systems
+| Step | What you do                                            | Where              |
+| ---- | ------------------------------------------------------ | ------------------ |
+| 1    | Connect to your VPS                                    | your computer      |
+| 2    | Install Drevanta (one command)                         | the VPS            |
+| 3    | Open your secure SSH tunnel                            | your computer      |
+| 4    | Open your setup link                                   | your browser       |
+| 5    | Create your administrator account                      | your browser       |
+| 6    | Configure MFA and save recovery codes                  | your browser       |
+| 7    | Enter your dashboard                                   | your browser       |
+
+## Before you start: what kind of server you need
 
 | Requirement    | Minimum                                | Notes                                                |
 | -------------- | -------------------------------------- | ---------------------------------------------------- |
@@ -31,48 +55,63 @@ you need is written out in full. By the end you will have:
 | Access         | SSH into the server as root or a sudo-capable user | You need this for installation only       |
 | Tools on the server | `curl`, `systemd` (always present on Ubuntu/Debian) | The installer checks everything for you  |
 
-You also need the release artifact on the server: a single binary file
-named `drevantad-linux-amd64`, plus the `deploy/install.sh` script. If
-someone built Drevanta for you, they will have given you both. If you
-build it yourself from the repository: `make cross-linux-amd64`.
+## Step 1 — Connect to your VPS
 
-**You do NOT need:** Docker, a web server, a domain name, TLS
-certificates, or any open port besides SSH (22). Drevanta refuses that
-extra machinery on purpose.
+On **your computer**, open a terminal (Linux/macOS) or PowerShell
+(Windows) and connect to the server you rented:
 
-## 2. One-command installation
-
-Copy the binary and the installer onto the server (from **your
-computer**, replacing the IP):
-
-```sh
-scp drevantad-linux-amd64 install.sh root@YOUR_VPS_IP:/root/
-```
-
-Then log in and run the installer:
-
-```sh
+```bash
 ssh root@YOUR_VPS_IP
-sudo install.sh install --binary /root/drevantad-linux-amd64
 ```
 
-That single command performs, in order: preflight checks (nothing is
-changed if any check fails), service-user creation, release install,
-hardened systemd unit, start, a health verification, and — for a fresh
-installation — the issuance of your **one-time claim token**.
+The first time you connect, SSH asks to confirm the server's
+fingerprint: type `yes` and press Enter, then enter the password your
+hosting provider gave you (or use your SSH key, if you configured one).
+You are now on the VPS — everything in Step 2 happens *on the server*.
 
-Two optional variations:
+## Step 2 — Install Drevanta
 
-```sh
-sudo install.sh preflight --binary /root/drevantad-linux-amd64  # checks only, changes nothing
-sudo install.sh install --binary /root/drevantad-linux-amd64 --skip-claim  # install now, token later
+### The official one-command installer *(planned — not live yet)*
+
+The finished user journey is a single command on the VPS:
+
+```bash
+curl -fsSL https://github.com/backupamunga-ops/drevanta_server_manager/releases/latest/download/bootstrap.sh | sh
 ```
 
-## 3. The installer success screen (example)
+What this will do once it goes live: download the release payload
+(the daemon plus the tested installer) from Drevanta's official GitHub
+Releases over HTTPS, **verify every file against the release's
+published sha256 checksums before executing anything** (fail closed on
+any mismatch), and then run the standard installer with all of its
+security defaults — loopback-only service, hardened systemd unit, no
+firewall or SSH changes. The command's release source is the
+`backupamunga-ops/drevanta_server_manager` GitHub Releases page; the
+verification mechanism is the per-release `checksums.txt` that the
+release pipeline publishes alongside the artifacts.
 
-On a successful **interactive** installation (you ran it in your own
-terminal) you will see a screen like this — the token shown here is
-**redacted for the example**; yours will be a full 48-character code:
+**This command does not work today.** The first release has not been
+published and the repository is not publicly readable, so the URL above
+is not a download endpoint yet. Do not run it — and do not trust any
+installation URL claiming to be Drevanta — until it is announced in the
+official release notes. Publishing is prepared: tagging a release makes
+CI build and publish the verified payload automatically.
+
+### Today's temporary procedure (development)
+
+Until then, Drevanta is installed by the person or team producing the
+releases: a verified binary and the installer are transferred to the
+server, and the tested installer is run directly. The exact commands —
+building, transferring, and installing — are in
+[For Developers — Manual Installation & Building from Source](#for-developers--manual-installation--building-from-source).
+If someone set the server up for you, they have already done this part:
+continue at Step 3.
+
+### What a successful install prints
+
+On a successful **interactive** installation you will see a screen like
+this — the token shown here is **redacted for the example**; yours will
+be a full 48-character code:
 
 ```
 ✓ DREVANTA INSTALLED SUCCESSFULLY
@@ -104,12 +143,13 @@ terminal) you will see a screen like this — the token shown here is
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Everything you need is on this screen: the SSH tunnel command (STEP 1),
-the ready-to-open setup link (STEP 2), how long the link stays valid,
-and a reminder that it works exactly once. **Leave this terminal window
-open until you have opened the link** — the token is shown only this
-once. If you close it anyway, Section 5 shows the one command that gets
-you a fresh link.
+Everything you need is on this screen: the SSH tunnel command (used in
+Step 3), the ready-to-open setup link (Step 4), how long the link stays
+valid, and a reminder that it works exactly once. **Leave this terminal
+window open until you have opened the link** — the token is shown only
+this once. If you close it anyway, [Step 4's notes](#step-4--open-your-setup-link)
+and [the regenerate command](#if-the-link-is-lost-or-expired-one-command-fixes-it)
+show how to get a fresh link.
 
 If the installer ran without a terminal attached (automation, CI), it
 never prints the token. Instead it writes it to a root-only file
@@ -117,7 +157,138 @@ never prints the token. Instead it writes it to a root-only file
 it with `sudo cat /root/.drevanta-claim-token` and delete the file once
 onboarding is done.
 
-## 4. What the claim token is, and how it is delivered
+## Step 3 — Open your secure SSH tunnel
+
+Drevanta's dashboard exists only on the server's loopback interface, so
+you open a private tunnel from your computer through SSH. Keep the
+tunnel open whenever you use the dashboard.
+
+### From Windows (PowerShell)
+
+Windows 10 (1809+) and Windows 11 ship with a built-in SSH client —
+no installation needed. On **your Windows computer**:
+
+1. Click **Start**, type `powershell`, press **Enter**.
+2. In the blue PowerShell window, paste (replace the user and IP with
+   the values from the STEP 1 line of your success screen):
+
+   ```powershell
+   ssh -N -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
+   ```
+
+3. The first time, it asks to confirm the server's fingerprint: type
+   `yes` and press **Enter**. Then enter the server password when
+   prompted (or nothing, if you use a key).
+4. **The window will look like it is hanging — that is correct.** An
+   SSH tunnel with `-N` opens no remote shell; it just forwards. Keep
+   this window open the whole time you are using the dashboard.
+   Closing the window closes the tunnel.
+
+If PowerShell says `ssh` is not recognized, enable the optional
+feature: *Settings → Apps → Optional features → Add feature → OpenSSH
+Client*.
+
+### From Linux or macOS
+
+On **your computer**, in any terminal:
+
+```sh
+ssh -N -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
+```
+
+Same notes as Windows: confirm the fingerprint once, enter your
+password or let your key do the work, and **leave the terminal open**.
+The command produces no output while it runs — silence means the tunnel
+is up.
+
+To run it in the background instead (macOS/Linux), add `-f`:
+
+```sh
+ssh -fN -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
+# later, to close it:
+pkill -f "ssh -fN -L 18080"
+```
+
+## Step 4 — Open your setup link
+
+With the tunnel running, open **STEP 2's link** from the success screen
+in your browser:
+
+```
+http://127.0.0.1:18080/onboarding#token=drv1_…
+```
+
+What happens:
+
+- The `#token=…` part (the *fragment*) never travels to any network —
+  your browser keeps fragments local. Drevanta additionally scrubs the
+  token out of the address bar and browser history immediately after
+  loading it, so it does not linger in autofill or session restore.
+- The onboarding page replaces the token field with a green
+  **Setup token loaded** chip; the value is masked and never shown in
+  full. Click **Change** any time to enter a different token. If you
+  opened plain `http://127.0.0.1:18080/onboarding` instead (no
+  fragment), the manual field is shown directly: paste the raw token
+  from your terminal, or the whole setup link — both work.
+- Nothing is sent anywhere except to Drevanta itself, through the
+  tunnel, on your own machine.
+
+> The page will only load while the tunnel from Step 3 is running.
+> If the browser cannot connect, see [Troubleshooting](#troubleshooting).
+
+## Step 5 — Create your administrator account
+
+On the onboarding page:
+
+1. Confirm the loaded token (the green **Setup token loaded** chip, or
+   click **Change** to paste the raw one) and continue.
+2. Choose your **administrator username** (3–32 characters: letters,
+   digits, dots, underscores, hyphens).
+3. Choose a **password of at least 12 characters** — a passphrase of
+   several unrelated words is both stronger and easier to remember.
+   Drevanta stores only an Argon2id hash of it; nobody (including you
+   via support) can read it back.
+4. Submit. This single submission consumes the claim token and binds
+   the account as the **first owner** — from this moment the claim
+   token is dead forever, and no new one can be created.
+
+## Step 6 — Configure MFA and save recovery codes
+
+The wizard then asks you to set up two-factor authentication:
+
+1. Scan the displayed QR code with any TOTP authenticator app — Google
+   Authenticator, Aegis, 1Password, Raivo, KeePassXC all work. (Or type
+   the shown secret manually into the app.)
+2. Enter the **current 6-digit code** from the app to confirm the setup.
+3. The wizard then shows **10 recovery codes, exactly once**. Save them
+   properly: download/copy them into a password manager, or print them.
+   Each code works a single time as a replacement for the 6-digit code
+   at login — this is what gets you in if you lose your phone.
+4. If you genuinely cannot use an authenticator app right now, the
+   wizard offers an explicit, audited **MFA skip** — you can enable MFA
+   later. Skipping is recorded in the audit log; it is never silent.
+
+**Do not skip saving the recovery codes.** Without the authenticator
+and without recovery codes, regaining access means wiping and
+re-onboarding the instance.
+
+## Step 7 — Enter your dashboard
+
+After onboarding you land on the dashboard. Every later visit:
+
+1. Start the tunnel (Step 3) — it is only needed while the dashboard is
+   open in a tab.
+2. Open `http://127.0.0.1:18080/login`.
+3. Sign in with username + password + the current 6-digit code from
+   your authenticator app. (Lost phone? Use a recovery code from
+   Step 6 in place of the 6-digit code.)
+4. Sessions expire automatically after a sliding window (and a hard
+   cap); you simply sign in again when that happens.
+
+The dashboard shows live CPU, memory, disk, load and uptime. Metrics
+are read on demand — Drevanta never runs background samplers.
+
+## What the claim token is, and how it is delivered
 
 The claim token is a **single-use, expiring key** that proves "I am the
 rightful owner of this fresh server" when you create the first
@@ -143,7 +314,7 @@ rotate it (rotating would silently invalidate the link you may still be
 holding). Rotation only happens when you explicitly ask for it — see the
 next section.
 
-## 5. Lost or expired the link? One command fixes it
+## If the link is lost or expired: one command fixes it
 
 If the 30 minutes passed, the terminal was closed, or the link was lost,
 run this **on the VPS**:
@@ -175,132 +346,7 @@ sudo -u drevanta /opt/drevanta/current/drevantad claim init --data-dir /var/lib/
 You never need the long form; it is listed here only so you know what
 the short command maps to.
 
-## 6. Opening the tunnel from Windows (PowerShell)
-
-Windows 10 (1809+) and Windows 11 ship with a built-in SSH client —
-no installation needed. On **your Windows computer**:
-
-1. Click **Start**, type `powershell`, press **Enter**.
-2. In the blue PowerShell window, paste (replace the user and IP with
-   the values from the STEP 1 line of your success screen):
-
-   ```powershell
-   ssh -N -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
-   ```
-
-3. The first time, it asks to confirm the server's fingerprint: type
-   `yes` and press **Enter**. Then enter the server password when
-   prompted (or nothing, if you use a key).
-4. **The window will look like it is hanging — that is correct.** An
-   SSH tunnel with `-N` opens no remote shell; it just forwards. Keep
-   this window open the whole time you are using the dashboard.
-   Closing the window closes the tunnel.
-
-If PowerShell says `ssh` is not recognized, enable the optional
-feature: *Settings → Apps → Optional features → Add feature → OpenSSH
-Client*.
-
-## 7. Opening the tunnel from Linux or macOS
-
-On **your computer**, in any terminal:
-
-```sh
-ssh -N -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
-```
-
-Same notes as Windows: confirm the fingerprint once, enter your
-password or let your key do the work, and **leave the terminal open**.
-The command produces no output while it runs — silence means the tunnel
-is up.
-
-To run it in the background instead (macOS/Linux), add `-f`:
-
-```sh
-ssh -fN -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
-# later, to close it:
-pkill -f "ssh -fN -L 18080"
-```
-
-## 8. Opening the token-prefilled onboarding URL
-
-With the tunnel running, open **STEP 2's link** from the success screen
-in your browser:
-
-```
-http://127.0.0.1:18080/onboarding#token=drv1_…
-```
-
-What happens:
-
-- The `#token=…` part (the *fragment*) never travels to any network —
-  your browser keeps fragments local. Drevanta additionally scrubs the
-  token out of the address bar and browser history immediately after
-  loading it, so it does not linger in autofill or session restore.
-- The onboarding page replaces the token field with a green
-  **Setup token loaded** chip; the value is masked and never shown in
-  full. Click **Change** any time to enter a different token. If you
-  opened plain `http://127.0.0.1:18080/onboarding` instead (no
-  fragment), the manual field is shown directly: paste the raw token
-  from your terminal, or the whole setup link — both work.
-- Nothing is sent anywhere except to Drevanta itself, through the
-  tunnel, on your own machine.
-
-> The page will only load while the tunnel from Sections 6/7 is running.
-> If the browser cannot connect, see Section 12.
-
-## 9. Creating the first administrator account
-
-On the onboarding page:
-
-1. Confirm the loaded token (the green **Setup token loaded** chip, or
-   click **Change** to paste the raw one) and continue.
-2. Choose your **administrator username** (3–32 characters: letters,
-   digits, dots, underscores, hyphens).
-3. Choose a **password of at least 12 characters** — a passphrase of
-   several unrelated words is both stronger and easier to remember.
-   Drevanta stores only an Argon2id hash of it; nobody (including you
-   via support) can read it back.
-4. Submit. This single submission consumes the claim token and binds
-   the account as the **first owner** — from this moment the claim
-   token is dead forever, and no new one can be created.
-
-## 10. Configuring MFA and saving your recovery codes
-
-The wizard then asks you to set up two-factor authentication:
-
-1. Scan the displayed QR code with any TOTP authenticator app — Google
-   Authenticator, Aegis, 1Password, Raivo, KeePassXC all work. (Or type
-   the shown secret manually into the app.)
-2. Enter the **current 6-digit code** from the app to confirm the setup.
-3. The wizard then shows **10 recovery codes, exactly once**. Save them
-   properly: download/copy them into a password manager, or print them.
-   Each code works a single time as a replacement for the 6-digit code
-   at login — this is what gets you in if you lose your phone.
-4. If you genuinely cannot use an authenticator app right now, the
-   wizard offers an explicit, audited **MFA skip** — you can enable MFA
-   later. Skipping is recorded in the audit log; it is never silent.
-
-**Do not skip saving the recovery codes.** Without the authenticator
-and without recovery codes, regaining access means wiping and
-re-onboarding the instance.
-
-## 11. Signing in and using the dashboard
-
-After onboarding you land on the dashboard. Every later visit:
-
-1. Start the tunnel (Sections 6/7) — it is only needed while the
-   dashboard is open in a tab.
-2. Open `http://127.0.0.1:18080/login`.
-3. Sign in with username + password + the current 6-digit code from
-   your authenticator app. (Lost phone? Use a recovery code from
-   Section 10 in place of the 6-digit code.)
-4. Sessions expire automatically after a sliding window (and a hard
-   cap); you simply sign in again when that happens.
-
-The dashboard shows live CPU, memory, disk, load and uptime. Metrics
-are read on demand — Drevanta never runs background samplers.
-
-## 12. Troubleshooting
+## Troubleshooting
 
 **The browser says "connection refused" / "can't connect"**
 - Is the tunnel still running? The `ssh -N -L …` window must be open
@@ -358,7 +404,7 @@ it is deliberately loud.
 Force-refresh (Ctrl+Shift+R). The dashboard is embedded in the binary;
 a stale cached page from an old release is the usual culprit.
 
-## 13. Why Drevanta only listens on loopback (the default, by design)
+## Why Drevanta only listens on loopback (the default, by design)
 
 Most server panels punch a hole in the firewall and add a login page on
 the public internet. That page then has to defend itself against every
@@ -382,7 +428,7 @@ Drevanta inverts the model:
 You already had a secure management channel — SSH. Drevanta simply uses
 it instead of inventing a new, weaker one.
 
-## 14. Future option: public HTTPS access
+## Future option: public HTTPS access
 
 Loopback-only is the default and will remain it. If you later want the
 dashboard reachable from a browser without a tunnel — for a team, or
@@ -413,3 +459,104 @@ SSH tunnel gives you the same dashboard today with no extra risk.
 | Your computer  | `ssh -N -L 18080:127.0.0.1:8080 USER@YOUR_VPS_IP`        | Open the access tunnel           |
 | Your browser   | `http://127.0.0.1:18080/onboarding#token=…`              | First-time setup (once)          |
 | Your browser   | `http://127.0.0.1:18080/login`                           | Everyday sign-in                 |
+
+---
+
+## For Developers — Manual Installation & Building from Source
+
+This section is the **temporary development procedure** referenced in
+Step 2. It is not part of the user journey: ordinary VPS owners should
+never need it once official release hosting goes live.
+
+### Prerequisites (build machine)
+
+- Go ≥ 1.23, Node ≥ 20, npm (for the dashboard build).
+- A Linux amd64 target host with systemd (Ubuntu 20.04+/Debian 11+),
+  SSH access as root or a sudo-capable user.
+
+### Clone and build
+
+```sh
+git clone https://github.com/backupamunga-ops/drevanta_server_manager.git
+cd drevanta_server_manager
+
+make build              # web/build (SvelteKit static) then bin/drevantad — dev build
+make cross-linux-amd64  # static release binary -> dist/drevantad-linux-amd64
+```
+
+`make cross-linux-amd64` is what release artifacts are built from
+(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`, trimmed and stripped). Verify
+what you built: `./dist/drevantad-linux-amd64 version`.
+
+### Transfer the artifacts to the VPS
+
+Two files go to the server: the binary and the `deploy/` scripts
+(the installer stages its companions from its own directory):
+
+```sh
+scp dist/drevantad-linux-amd64 deploy/install.sh deploy/drevanta.sh \
+    deploy/rollback.sh deploy/healthgate.sh root@YOUR_VPS_IP:/root/
+```
+
+Downloading release artifacts instead of building: once official
+releases exist (see the planned installer in Step 2), fetch the files
+from the release and **check them against that release's
+`checksums.txt`** before use — the same fail-closed rule the bootstrap
+applies.
+
+### Run the installer directly on the VPS
+
+```sh
+ssh root@YOUR_VPS_IP
+sudo bash install.sh install --binary /root/drevantad-linux-amd64
+```
+
+Variations:
+
+```sh
+sudo bash install.sh preflight --binary /root/drevantad-linux-amd64   # checks only, changes nothing
+sudo bash install.sh install --binary /root/drevantad-linux-amd64 --skip-claim   # install now, token later
+sudo bash install.sh --uninstall                                      # remove (state kept; --purge wipes)
+```
+
+That single command performs, in order: preflight checks (nothing is
+changed if any check fails), service-user creation, release install,
+hardened systemd unit, start, a health verification with automatic
+rollback, and — for a fresh installation — the issuance of your
+**one-time claim token**. Re-running is safe (idempotent; an existing
+active claim token is never rotated).
+
+Upgrades are the same command with a new binary; the runbook
+(`deploy/DEPLOY.md`) documents the health gate, manual rollback drill
+and verification checklist.
+
+### Local development and testing
+
+```sh
+make run             # dev daemon on 127.0.0.1:8080, state in /tmp/drevanta-dev
+make test            # Go unit tests
+make vet             # gofmt + go vet
+make web-build       # dashboard only
+make installer-test  # full installer/rollback/bootstrap harness (needs a built binary)
+make shellcheck      # lint the deploy scripts
+```
+
+`make installer-test` runs every installer behaviour against a mocked
+system, including the bootstrap's download-and-verify contract.
+
+### Troubleshooting developer installs
+
+- **"drevantad binary not found"** — pass `--binary` explicitly, or
+  build with `make cross-linux-amd64` so
+  `dist/drevantad-linux-amd64` exists.
+- **"port 8080 is in use"** — an existing Drevanta install owns the
+  port; that is treated as an upgrade, not an error. A *foreign* service
+  on 8080 blocks installation by design.
+- **"web build missing"** — the dashboard is embedded at compile time;
+  run `make build` (not just `go build`) for a dev binary, or
+  `make cross-linux-amd64` for a release binary.
+- **Wrong architecture binary** — the release is linux/amd64; check
+  `uname -m` on the target host.
+- **Dashboard changes not visible** — rebuild the binary
+  (`go:embed` bakes `web/build` in at compile time) and force-refresh
+  the browser.

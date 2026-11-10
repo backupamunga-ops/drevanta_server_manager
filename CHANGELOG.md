@@ -4,6 +4,58 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [Unreleased] — installation UX & documentation correction
+
+Makes the SSH-first installation journey the spine of the user guide
+and prepares (but deliberately does **not** activate) the public
+one-command installer: the repository is private and no release
+artifacts exist, so no installation URL is functional yet and none is
+presented as such.
+
+### Added
+- **`deploy/bootstrap.sh`** — the public one-command entry point,
+  implemented and harness-tested but **not published**. Resolves the
+  requested release over HTTPS (tag or `latest` via the GitHub
+  redirect), downloads the release payload (daemon, installer, wrapper,
+  rollback/healthgate scripts), **verifies every artifact against the
+  release's `checksums.txt` strictly before executing anything**, and
+  then runs the existing tested `deploy/install.sh` — no installation
+  logic is duplicated. HTTPS-only: non-HTTPS sources are refused and
+  redirects may not downgrade the protocol; any verification failure
+  aborts with nothing changed on the host.
+- **`.github/workflows/release.yml`** — tag-triggered release
+  publishing (prepares the delivery endpoint; creates nothing until a
+  `v*` tag is pushed): builds the release payload, emits `checksums.txt`,
+  verifies the checksum round-trip, and publishes the GitHub Release
+  with all six artifacts including `bootstrap.sh`.
+- Installer harness: `test_bootstrap_installer` — end-to-end against a
+  GitHub-shaped local fixture server (real curl): latest-release
+  redirect resolution, verified download → real `install.sh` → install
+  with the Sprint 2.5 token-delivery policy intact (0600 file, nothing
+  in stdout), plus fail-closed refusals for a tampered artifact, a
+  missing checksum entry, a missing artifact and a plain-HTTP source.
+  109 → 123 assertions.
+
+### Changed
+- **`docs/INSTALLATION.md` restructured around the user journey** —
+  Step 1 Connect (`ssh root@YOUR_VPS_IP`) through Step 7 dashboard;
+  Step 2 shows the verified one-command installer clearly marked
+  **planned** (with its release source and verification mechanism) and
+  names today's temporary development procedure without making
+  developer steps a user prerequisite. Manual artifact handling moved
+  to **For Developers — Manual Installation & Building from Source**
+  (clone, build, cross-compile, transfer/SCP, running
+  `deploy/install.sh` directly, local testing, troubleshooting).
+- **README** links the user guide and the developer instructions
+  separately, and no longer describes installation as a one-command
+  operation until it actually is one.
+
+### Security
+- No runtime code changed: daemon, CLI, installer, token handling and
+  the deployed VPS are untouched. The bootstrap adds no privileges and
+  changes no defaults; it only stages and verifies artifacts before
+  invoking the tested installer.
+
 ## [0.3.5-onboard-ui] — 2026-11-10
 
 Fix: untouched field errors were rendered on the claim form. The port

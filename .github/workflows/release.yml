@@ -1,0 +1,80 @@
+# Release publishing — prepared infrastructure, not yet used.
+#
+# Pushing a tag (git tag v0.3.6 && git push origin v0.3.6) builds the
+# release payload exactly as deploy/bootstrap.sh expects it and publishes
+# a GitHub Release with these assets:
+#
+#   drevantad-linux-amd64   the linux/amd64 daemon (dashboard embedded)
+#   install.sh              the tested installer (deploy/install.sh)
+#   drevanta.sh             the friendly sudo front-end
+#   rollback.sh, healthgate.sh
+#   bootstrap.sh            the public one-command entry point
+#   checksums.txt           sha256 of every artifact above
+#
+# No release exists yet and none is created by this file alone: publishing
+# happens only when a tag is pushed. Until the first tagged release is
+# published (and the repository or mirror is reachable publicly), the
+# one-command installation documented in docs/INSTALLATION.md stays
+# PLANNED — do not present it as working.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build, checksum and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build dashboard and daemon
+        run: |
+          (cd web && npm ci && npm run build)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags='-s -w' \
+            -o dist/drevantad-linux-amd64 ./cmd/drevantad
+          ./dist/drevantad-linux-amd64 version
+
+      - name: Assemble release payload
+        run: |
+          mkdir -p release
+          cp dist/drevantad-linux-amd64 release/
+          cp deploy/install.sh deploy/drevanta.sh deploy/rollback.sh \
+             deploy/healthgate.sh deploy/bootstrap.sh release/
+          (cd release && sha256sum \
+            drevantad-linux-amd64 install.sh drevanta.sh \
+            rollback.sh healthgate.sh bootstrap.sh > checksums.txt)
+          cat release/checksums.txt
+
+      - name: Verify payload round-trip (fail closed)
+        run: (cd release && sha256sum -c checksums.txt)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Drevanta ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            release/drevantad-linux-amd64 \
+            release/install.sh \
+            release/drevanta.sh \
+            release/rollback.sh \
+            release/healthgate.sh \
+            release/bootstrap.sh \
+            release/checksums.txt

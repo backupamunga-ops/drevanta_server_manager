@@ -58,6 +58,17 @@ EOF
 # Mock curl: emulates the loopback HTTP surface of the CURRENT release.
 # /readyz answers ready unless the current release dir carries a .broken
 # marker (the harness's way to simulate a bad release).
+#
+# Bootstrap tests delegate fixture downloads to the REAL curl (prefix
+# match) so HTTPS/redirect logic is exercised end to end; the prefix
+# never matches the daemon's loopback API surface handled below.
+if [[ -n "${REAL_CURL_URL_PREFIX:-}" ]]; then
+        for a in "$@"; do
+                case "$a" in
+                        "${REAL_CURL_URL_PREFIX}"*) exec "${REAL_CURL_BIN:-/usr/bin/curl}" "$@" ;;
+                esac
+        done
+fi
 url="${@: -1}"
 cur_dir="$(readlink -f "$MOCK_OPT_DIR/current" 2>/dev/null || true)"
 case "$url" in
@@ -100,6 +111,9 @@ EOF
         for t in uname awk df sha256sum install diff journalctl head sleep seq mkdir ln mv chmod chown grep basename dirname readlink cat sed tr cut stat ls touch rm printf echo; do
                 p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$mockdir/$t"
         done
+        # Real curl, captured before the mock PATH exists: the bootstrap
+        # fixture downloads must exercise genuine curl behaviour.
+        REAL_CURL_BIN="$(command -v curl 2>/dev/null || true)"
         cat > "$mockdir/id" <<'EOF'
 #!/usr/bin/env bash
 [[ "$1" == "-u" ]] && { echo 0; exit 0; }
@@ -342,6 +356,208 @@ test_skip_claim() {
                 || fail "token state changed: $before_status -> $after_status"
 }
 
+# ---------------------------------------------------------------------------
+# Bootstrap (the prepared public one-command installer)
+# ---------------------------------------------------------------------------
+
+# A minimal GitHub-Releases-shaped fixture server:
+#   GET /releases/latest                     -> 302 to /releases/download/<tag>/
+#   GET /releases/download/<tag>/<artifact>  -> file from $1 (missing = 404)
+# Writes its bound port to $2. Mimics exactly the URL layout
+# deploy/bootstrap.sh expects from the official release source.
+write_fixture_server() {
+        cat > "$sandbox/fixture_server.py" <<'PYEOF'
+import http.server
+import os
+import sys
+import urllib.parse
+
+FIXTURE = sys.argv[1]
+TAG = sys.argv[2]
+PORT_FILE = sys.argv[3]
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == '/releases/latest':
+            # GitHub shape: redirect to the tag PAGE (no trailing slash).
+            self.send_response(302)
+            self.send_header('Location', '/releases/tag/%s' % TAG)
+            self.end_headers()
+            return
+        if path.startswith('/releases/tag/'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b'<html><body>tag page</body></html>')
+            return
+        if path.startswith('/releases/download/'):
+            rest = path[len('/releases/download/'):]
+            parts = rest.split('/', 1)
+            if len(parts) == 2 and parts[0] == TAG and parts[1]:
+                candidate = os.path.join(FIXTURE, parts[1])
+                if os.path.isfile(candidate):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.end_headers()
+                    with open(candidate, 'rb') as fh:
+                        self.wfile.write(fh.read())
+                    return
+        self.send_response(404)
+        self.end_headers()
+
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+with open(PORT_FILE, 'w') as fh:
+    fh.write(str(server.server_address[1]))
+server.serve_forever()
+PYEOF
+}
+
+test_bootstrap_installer() {
+        section "bootstrap: verified download -> install, tampering refused"
+
+        local fixture="$sandbox/bootstrap-fixture"
+        mkdir -p "$fixture"
+        cp "$sandbox/staged-drevantad" "$fixture/drevantad-linux-amd64"
+        cp "$DEPLOY/install.sh" "$DEPLOY/drevanta.sh" "$DEPLOY/rollback.sh" \
+                "$DEPLOY/healthgate.sh" "$fixture/"
+        ( cd "$fixture" && sha256sum drevantad-linux-amd64 install.sh drevanta.sh \
+                rollback.sh healthgate.sh > checksums.txt )
+        write_fixture_server
+        python3 "$sandbox/fixture_server.py" "$fixture" v0.0.0-test \
+                "$sandbox/fixture.port" >/dev/null 2>&1 &
+        local srv_pid=$!
+        local tries=0
+        while [[ ! -s "$sandbox/fixture.port" && $tries -lt 50 ]]; do
+                sleep 0.1
+                tries=$((tries + 1))
+        done
+        if [[ ! -s "$sandbox/fixture.port" ]]; then
+                kill "$srv_pid" 2>/dev/null || true
+                fail "fixture server did not start"
+                return
+        fi
+        local port base
+        port="$(cat "$sandbox/fixture.port")"
+        base="http://127.0.0.1:$port/releases"
+        export REAL_CURL_URL_PREFIX="$base/"
+        export REAL_CURL_BIN
+
+        # Isolated opt/state dirs so this install is unambiguous; the unit
+        # path stays shared (the systemctl mock watches that exact file).
+        local boot_opt="$sandbox/opt-boot"
+        mkdir -p "$boot_opt/releases"
+        export MOCK_OPT_DIR="$boot_opt"
+        echo '{"instance_status":"unclaimed","mfa_mode":"","claim_token_active":false,"authenticated":false}' \
+                > "$MOCK_STATUS_FILE"
+        local env_pairs=(
+                DREVANTA_SKIP_ROOT_CHECK=1
+                DREVANTA_BOOTSTRAP_ALLOW_HTTP=1
+                DREVANTA_INTERACTIVE=0
+                DREVANTA_TOKEN_FILE="$sandbox/state-boot/claim.txt"
+                DREVANTA_OPT_DIR="$boot_opt"
+                DREVANTA_STATE_DIR="$sandbox/state-boot"
+                DREVANTA_BIN_LINK_DIR="$sandbox/bin-link-boot"
+        )
+
+        # 1. A plain-HTTP release source is refused without the test escape.
+        if env -u DREVANTA_BOOTSTRAP_ALLOW_HTTP "${env_pairs[0]}" \
+                DREVANTA_OPT_DIR="$boot_opt" DREVANTA_STATE_DIR="$sandbox/state-boot" \
+                DREVANTA_BIN_LINK_DIR="$sandbox/bin-link-boot" \
+                "$DEPLOY/bootstrap.sh" --base-url "$base" \
+                >"$sandbox/boot-http.log" 2>&1; then
+                fail "plain-HTTP release source accepted"
+        elif grep -q "non-HTTPS" "$sandbox/boot-http.log"; then
+                pass "plain-HTTP release source refused"
+        else
+                fail "unexpected refusal: $(head -n 1 "$sandbox/boot-http.log")"
+        fi
+
+        # 2. A tampered artifact fails closed and installs nothing.
+        printf 'tampered' >> "$fixture/drevantad-linux-amd64"
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
+                --release v0.0.0-test --base-url "$base" \
+                >"$sandbox/boot-tamper.log" 2>&1; then
+                fail "tampered artifact passed verification"
+        elif grep -q "integrity check FAILED" "$sandbox/boot-tamper.log"; then
+                pass "tampered artifact refused (fail closed)"
+        else
+                fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-tamper.log")"
+        fi
+        [[ ! -e "$boot_opt/current" ]] && pass "nothing installed after refusal" \
+                || fail "release installed despite failed verification"
+
+        # 3. A missing checksum entry refuses even a bit-identical download.
+        cp "$sandbox/staged-drevantad" "$fixture/drevantad-linux-amd64"
+        grep -v ' healthgate.sh$' "$fixture/checksums.txt" > "$fixture/checksums.partial"
+        mv "$fixture/checksums.partial" "$fixture/checksums.txt"
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
+                --release v0.0.0-test --base-url "$base" \
+                >"$sandbox/boot-nosum.log" 2>&1; then
+                fail "missing checksum entry tolerated"
+        elif grep -q "no sha256 entry for 'healthgate.sh'" "$sandbox/boot-nosum.log"; then
+                pass "missing checksum entry refused"
+        else
+                fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-nosum.log")"
+        fi
+
+        # 4. A missing artifact (404) aborts before anything is executed.
+        ( cd "$fixture" && sha256sum drevantad-linux-amd64 install.sh drevanta.sh \
+                rollback.sh healthgate.sh > checksums.txt )
+        rm -f "$fixture/rollback.sh"
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" \
+                --release v0.0.0-test --base-url "$base" \
+                >"$sandbox/boot-404.log" 2>&1; then
+                fail "missing artifact tolerated"
+        elif grep -q "downloading rollback.sh failed" "$sandbox/boot-404.log"; then
+                pass "missing artifact aborts before execution"
+        else
+                fail "unexpected bootstrap failure: $(head -n 1 "$sandbox/boot-404.log")"
+        fi
+
+        # 5. Happy path: 'latest' resolved via the redirect, every artifact
+        #    verified, then the REAL install.sh runs from the staged payload.
+        cp "$DEPLOY/rollback.sh" "$fixture/rollback.sh"
+        if env "${env_pairs[@]}" "$DEPLOY/bootstrap.sh" --base-url "$base" \
+                >"$sandbox/boot-ok.log" 2>&1; then
+                pass "bootstrap install exit 0"
+        else
+                fail "bootstrap install failed"
+                sed -n '1,50p' "$sandbox/boot-ok.log"
+        fi
+        grep -q "resolving the latest published release" "$sandbox/boot-ok.log" \
+                && pass "latest release resolved via redirect" || fail "latest not resolved"
+        grep -q "integrity verified" "$sandbox/boot-ok.log" \
+                && pass "payload verified before execution" || fail "verification not logged"
+        grep -q "is installed and running" "$sandbox/boot-ok.log" \
+                && pass "install.sh completed through the bootstrap" || fail "install did not finish"
+        [[ -x "$boot_opt/current/drevantad" ]] \
+                && pass "release installed from verified download" || fail "no release installed"
+        [[ "$(get_version "$boot_opt/current/drevantad")" == "$(get_version "$sandbox/staged-drevantad")" ]] \
+                && pass "installed binary is the verified one" || fail "wrong binary installed"
+        # The Sprint 2.5 token-delivery policy survives the bootstrap path:
+        # noninteractive install delivers via the 0600 file, never stdout.
+        [[ -s "$sandbox/state-boot/claim.txt" ]] && pass "claim token delivered via file" \
+                || fail "no claim token file"
+        [[ "$(stat -c '%a' "$sandbox/state-boot/claim.txt")" == "600" ]] \
+                && pass "claim token file is 0600" || fail "token file mode wrong"
+        if grep -q "drv1_" "$sandbox/boot-ok.log"; then
+                fail "token leaked through bootstrap output"
+        else
+                pass "no token in bootstrap output"
+        fi
+        rm -f "$sandbox/state-boot/claim.txt"
+
+        kill "$srv_pid" 2>/dev/null || true
+        unset REAL_CURL_URL_PREFIX REAL_CURL_BIN
+        export MOCK_OPT_DIR="$sandbox/opt"
+}
+
 test_docs_match_cli() {
         section "documentation commands match the actual CLI"
         local repo
@@ -503,6 +719,7 @@ main() {
         test_rollback_script
         test_rollback_no_target
         test_healthgate
+        test_bootstrap_installer
         test_uninstall
 
         echo

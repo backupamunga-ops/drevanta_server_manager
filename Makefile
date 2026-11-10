@@ -43,4 +43,4 @@ installer-test:
 
 ## shellcheck: lint the deploy scripts (requires shellcheck)
 shellcheck:
-	shellcheck deploy/install.sh deploy/rollback.sh deploy/healthgate.sh deploy/drevanta.sh deploy/tests/test_install.sh
+	shellcheck deploy/install.sh deploy/rollback.sh deploy/healthgate.sh deploy/drevanta.sh deploy/bootstrap.sh deploy/tests/test_install.sh
