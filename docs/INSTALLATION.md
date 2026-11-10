@@ -49,7 +49,7 @@ example `ubuntu`, `admin`, or `debian`). Windows users: open PowerShell
 Still inside the VPS SSH session, run:
 
 ```bash
-curl -fsSL https://github.com/backupamunga-ops/drevanta_server_manager/releases/latest/download/bootstrap.sh | sh
+curl -fsSL https://github.com/backupamunga-ops/drevanta_server_manager/releases/latest/download/bootstrap.sh | bash
 ```
 
 What this one command does, in order:
@@ -87,7 +87,7 @@ Public HTTPS is attempted **automatically on a fresh install** and never
 on upgrades. To control it explicitly:
 
 ```bash
-curl -fsSL https://github.com/backupamunga-ops/drevanta_server_manager/releases/latest/download/bootstrap.sh | sh -s -- --https no
+curl -fsSL https://github.com/backupamunga-ops/drevanta_server_manager/releases/latest/download/bootstrap.sh | bash -s -- --https no
 ```
 
 ## Step 3 — Open your setup link

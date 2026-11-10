@@ -74,6 +74,15 @@ ARTIFACTS=(
         healthgate.sh
 )
 
+# Guard: this script uses bash arrays. Piping into `sh` (dash on
+# Debian/Ubuntu) would die with a cryptic syntax error — fail with the
+# correct command instead, before anything happens.
+if [[ -z "${BASH_VERSION:-}" ]]; then
+        echo "ERROR: this installer must run under bash. Use:" >&2
+        echo "  curl -fsSL <bootstrap-url> | bash" >&2
+        exit 2
+fi
+
 log()  { printf '==> %s\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 error() { printf 'ERROR: %s\n' "$*" >&2; }
