@@ -605,16 +605,23 @@ EOF
 }
 
 # §6 success screen when trusted HTTPS went live during a fresh install.
+# Customer-facing success output shows ONE action: the verified HTTPS
+# onboarding link (single-use token in the URL fragment). No localhost
+# URLs, no SSH-tunnel commands, no internal backend addresses — those
+# belong to the failure/fallback screen and the troubleshooting docs.
+# This screen is reached only after the certificate was issued and the
+# proxy reported phase=active (attempt_https_provisioning gates it).
 print_https_success_screen() {
-        local token="$1" target_file="$2"
-        local ttl_disp="$CLAIM_TTL"
-        [[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
+	local token="$1" target_file="$2"
+	local ttl_disp="$CLAIM_TTL"
+	[[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
 
-        cat <<EOF
+	cat <<EOF
 
 ✓ DREVANTA INSTALLED SUCCESSFULLY
 
-  Your private server console is ready.
+  Your private server console is ready, secured with a publicly
+  trusted certificate.
 
   OPEN DREVANTA IN YOUR BROWSER
 
@@ -623,24 +630,14 @@ print_https_success_screen() {
   Your setup link expires in ${ttl_disp}
   and can be used only once.
 
-  Lost or expired your link?
-  sudo drevanta claim regenerate
-
-  SECURE ACCESS
-  HTTPS enabled · Certificate valid
-
-  No domain required.
-
-  (Private fallback, if direct HTTPS ever stops working:
-   ssh -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${PORT} USER@YOUR_VPS_IP
-   then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/ )
+  Lost or expired your link?  sudo drevanta claim regenerate
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
-        if [[ -n "$target_file" ]]; then
-                info "a copy of the token is also saved root-only: $target_file - delete it after onboarding"
-        fi
-        info "manage public HTTPS any time: sudo drevanta access status | enable-https | disable-https"
+	if [[ -n "$target_file" ]]; then
+		info "a copy of the token is also saved root-only: $target_file - delete it after onboarding"
+	fi
+	info "manage access any time: sudo drevanta access status"
 }
 
 # attempt_https_provisioning runs the root-only access CLI once and
@@ -768,7 +765,11 @@ summary() {
         log "Drevanta $version is installed and running"
         info "service:    systemctl status $SERVICE_NAME"
         info "release:    $OPT_DIR/releases/$version"
-        info "endpoint:   http://${BIND_ADDR}:${PORT}  (loopback only)"
+        if [[ -n "${HTTPS_HOST:-}" ]]; then
+		info "access:     https://${HTTPS_HOST}  (public HTTPS, certificate verified)"
+	else
+		info "endpoint:   http://${BIND_ADDR}:${PORT}  (loopback only - SSH tunnel access)"
+	fi
 }
 
 # ---------------------------------------------------------------------------

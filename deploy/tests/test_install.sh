@@ -292,8 +292,14 @@ EOF
         grep -q "OPEN DREVANTA IN YOUR BROWSER" "$sandbox/install_https.log" && pass "§6 HTTPS success screen" || fail "no HTTPS success screen"
         grep -qE "https://23\.20\.15\.8/onboarding\#token=[A-Za-z0-9_-]{44}" "$sandbox/install_https.log" \
                 && pass "setup link uses the public HTTPS address" || fail "HTTPS setup link wrong"
-        grep -q "No domain required." "$sandbox/install_https.log" && pass "no-domain-required copy" || fail "no no-domain copy"
-        grep -q "HTTPS enabled · Certificate valid" "$sandbox/install_https.log" && pass "secure access summary" || fail "no secure access summary"
+        # Sprint 2.9: the customer-facing success screen shows ONLY the
+        # verified HTTPS onboarding link — no tunnel, no loopback addresses.
+        local screen
+        screen="$(sed -n '/OPEN DREVANTA IN YOUR BROWSER/,/━━━━━━━/p' "$sandbox/install_https.log")"
+        if grep -q "ssh -L" <<<"$screen"; then fail "tunnel command in success screen"; else pass "no tunnel command in success screen"; fi
+        if grep -q "127.0.0.1" <<<"$screen"; then fail "loopback address in success screen"; else pass "no loopback address in success screen"; fi
+        if grep -q ":8080" <<<"$screen"; then fail "backend address in success screen"; else pass "no backend address in success screen"; fi
+        grep -q "publicly" "$sandbox/install_https.log" && pass "trusted-certificate copy" || fail "no trusted-certificate copy"
         grep -q '"host": "23.20.15.8"' "$sandbox/https.json" && pass "access config written" || fail "config missing/wrong host"
         grep -q "enable --now drevanta-https.service" "$sandbox/calls_full" && pass "proxy unit enabled via systemd" || fail "unit not enabled"
         [[ -f "$sandbox/systemd/drevanta-https.service" ]] && pass "hardened proxy unit written" || fail "proxy unit missing"
@@ -341,6 +347,105 @@ EOF
         if grep -qE "https://[0-9a-zA-Z.]+/onboarding" "$sandbox/install_httpsfail.log"; then fail "public HTTPS link shown despite failure"; else pass "no public HTTPS link offered"; fi
         if grep "http://" "$sandbox/install_httpsfail.log" | grep -qv "127.0.0.1"; then fail "public HTTP URL offered"; else pass "no public HTTP fallback (loopback only)"; fi
         rm -f "$mockdir/systemctl-fail"
+}
+
+test_https_upgrade_with_active_unit() {
+        section "upgrade with running https unit: own ports are NOT a conflict"
+        # The installer's enable-https step previously aborted with
+        # "port 80 is already in use" on upgrades because the RUNNING
+        # drevanta-https unit itself holds 80/443. Hold the configured
+        # ports with a real listener and verify the attempt proceeds.
+        rm -rf "$sandbox/https-state"; mkdir -p "$sandbox/https-state"
+        cat > "$sandbox/https-state/status.json" <<'EOF'
+{"phase":"active","host":"23.20.15.8","profile":"shortlived","staging":false,
+ "not_before":"2026-11-01T00:00:00Z","not_after":"2030-01-01T00:00:00Z",
+ "issued_at":"2026-11-01T00:00:00Z","renewals":0,"updated_at":"2026-11-01T00:00:00Z"}
+EOF
+        cat > "$sandbox/https.json" <<'EOF'
+{"enabled":true,"host":"23.20.15.8","http_port":18081,"https_port":18443,
+ "backend":"127.0.0.1:8080","bind_ip":"","staging":false,"profile":"shortlived"}
+EOF
+        python3 - <<'PYLISTEN' &
+import socket, time
+socks = []
+for port in (18081, 18443):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(4)
+    socks.append(s)
+time.sleep(60)
+PYLISTEN
+        local listener_pid=$!
+        sleep 1
+        # Sanity: the ports really are occupied.
+        if python3 -c "import socket,sys
+s=socket.socket()
+try:
+    s.bind(('0.0.0.0', 18081)); s.close(); sys.exit(0)
+except OSError:
+    sys.exit(1)" ; then
+            fail "test listener did not hold port 18081"
+            kill "$listener_pid" 2>/dev/null
+            return
+        fi
+        DREVANTA_INTERACTIVE=1 DREVANTA_HTTPS_MODE=yes                 SSH_CONNECTION="198.51.100.9 51000 23.20.15.8 22"                 "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad"                 >"$sandbox/install_https_upgrade.log" 2>&1
+        local rc=$?
+        # While the ports are STILL held: a direct enable-https must
+        # recognize its own unit instead of failing.
+        local direct
+        direct="$(DREVANTA_ACCESS_CONFIG="$sandbox/https.json" \
+                DREVANTA_HTTPS_STATE_DIR="$sandbox/https-state" \
+                DREVANTA_HTTP_PORT=18081 DREVANTA_HTTPS_PORT=18443 \
+                "$sandbox/opt/current/drevantad" access enable-https --wait 1s 2>&1 || true)"
+        grep -q "held by the existing drevanta-https.service service (upgrade)" <<<"$direct" \
+                && pass "self-held ports recognized" || { fail "no self-held recognition line"; echo "$direct" | head -5; }
+        kill "$listener_pid" 2>/dev/null
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,60p' "$sandbox/install_https_upgrade.log"; return; }
+        if grep -q "already in use" "$sandbox/install_https_upgrade.log"; then
+                fail "false port-in-use error on upgrade"
+        else
+                pass "no false port-in-use error"
+        fi
+        grep -q "public HTTPS is live: https://23.20.15.8/" "$sandbox/install_https_upgrade.log" \
+                && pass "provisioning proceeded to verified live" || fail "no live report"
+        grep -qE "https://23\.20\.15\.8/onboarding\#token=" "$sandbox/install_https_upgrade.log" \
+                && pass "success screen shows the HTTPS link" || fail "no HTTPS link"
+}
+
+test_https_genuine_port_conflict() {
+        section "genuine port conflict: foreign listener, unit inactive -> clear error"
+        local bin="$sandbox/opt/current/drevantad" out rc
+        # A systemctl stub reporting the https unit INACTIVE (foreign
+        # conflict scenario) plus a real listener on the port.
+        cat > "$mockdir/systemctl-nounit" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "is-active drevanta-https.service" ]]; then exit 3; fi
+exec "$mockdir/systemctl" "\$@"
+EOF
+        chmod +x "$mockdir/systemctl-nounit"
+        python3 - <<'PYLISTEN2' &
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("0.0.0.0", 18443))
+s.listen(4)
+time.sleep(60)
+PYLISTEN2
+        local listener_pid=$!
+        sleep 1
+        out="$(DREVANTA_SYSTEMCTL="$mockdir/systemctl-nounit" \
+                DREVANTA_ACCESS_CONFIG="$sandbox/https.json" \
+                DREVANTA_HTTPS_STATE_DIR="$sandbox/https-state" \
+                DREVANTA_HTTP_PORT=18081 DREVANTA_HTTPS_PORT=18443 \
+                DREVANTA_ACCESS_FAKE_ROOT=1 DREVANTA_SKIP_USERADD=1 \
+                "$bin" access enable-https --wait 3s 2>&1)"
+        rc=$?
+        kill "$listener_pid" 2>/dev/null
+        [[ $rc -ne 0 ]] && pass "enable-https refused (rc=$rc)" || fail "conflict not detected"
+        grep -q "already in use by another program" <<<"$out" \
+                && pass "genuine conflict diagnosed" || { fail "no conflict message"; echo "$out" | head -5; }
+        grep -q "hint: ss -tlnp" <<<"$out" && pass "diagnostic hint shown" || fail "no hint"
 }
 
 test_access_cli_status_and_disable() {
@@ -884,6 +989,8 @@ main() {
         test_install_fresh_and_claim
         test_https_upgrade_leaves_config
         test_https_force_failure_fallback
+        test_https_upgrade_with_active_unit
+        test_https_genuine_port_conflict
         test_interactive_success_screen
         test_interactive_uses_real_connection_info
         test_noninteractive_default_token_file
