@@ -45,6 +45,9 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: map the domain-slot test domain to loopback
+        run: echo "127.0.0.1 dashboard.example.test" | sudo tee -a /etc/hosts
+
       - name: download pebble (Let's Encrypt test ACME server)
         run: |
           mkdir -p /tmp/pebble

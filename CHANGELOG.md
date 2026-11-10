@@ -4,6 +4,60 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.5] — post-install UX & maintenance: optional MFA, custom domain, installer cleanup
+
+### Added
+- **Optional MFA ("Skip for now")** — the initial administrator can
+  complete onboarding without MFA via an explicit two-step warning and
+  a machine-readable risk acknowledgement (`acknowledge_risk: true`);
+  the choice is audited (`mfa_skipped`). A skipped administrator enters
+  the dashboard immediately and can enable MFA at any time under the
+  new **Settings → Account Security** page; recovery codes are always
+  issued when MFA is enabled. Enrolled administrators keep every
+  protection (login still requires TOTP or a recovery code).
+- **Optional custom domain** — the onboarding wizard offers a compact
+  "server IP (default) / I have a domain" choice, and Settings can
+  configure or change the domain later. The backend validates the
+  hostname, verifies DNS A/AAAA against the VPS's own addresses, and
+  the httpsd proxy gains an independent SECOND certificate slot: the
+  IP certificate is always the primary slot and can never be displaced
+  by a domain operation. `apply` succeeds only after the certificate is
+  active AND the full TLS+proxy+backend route is verified; any failure
+  rolls the overlay back, so working IP HTTPS is never disturbed
+  (pinned by pebble and unit tests). SNI routes domain handshakes to
+  the domain certificate and IP/SNI-less handshakes to the primary one;
+  both slots renew independently. No Drevanta cloud account involved.
+- **Trusted dashboard access status** — `GET /api/v1/access/status`
+  (public, secret-free) reports the real access mode from the
+  root-written access configuration and the proxy status file. The
+  dashboard header/footer and the sign-in subtitle now show
+  "HTTPS secured" or "Private · SSH tunnel" from that source instead of
+  hardcoded labels; nothing is guessed from the browser URL.
+
+### Fixed
+- **Installer false "port 80 already in use" on upgrades** — the
+  enable-https precheck now recognizes its own running
+  `drevanta-https` unit (systemctl exit status) and proceeds; only a
+  foreign listener is a conflict. Harness scenarios added for fresh
+  installs, upgrades with an active HTTPS service, and genuine
+  conflicts; certificates, renewal state, config, administrator data
+  and rollback releases are preserved.
+- **Installer completion output cleanup** — the HTTPS success screen
+  shows exactly one action: the verified HTTPS onboarding link with the
+  single-use token in its URL fragment. No localhost URLs, tunnel
+  commands or backend addresses are printed on success; failures show
+  the actual reason plus the SSH-tunnel fallback, and the tunnel is
+  documented under troubleshooting/advanced access. The success screen
+  is unreachable until issuance AND readiness are verified.
+- CI `push` trigger repaired (`branches: [main]`; a corrupted literal
+  had disabled push builds).
+
+### Changed
+- MFA onboarding step is compact (matches the approved administrator
+  form density) while keeping the scannable QR, manual secret and
+  6-digit verification; the dashboard "mfa off" pill links to Account
+  Security; customer docs updated for both installer outcomes.
+
 ## [0.4.4] — production HTTPS hotfix: ACME profile + MFA fixes
 
 ### Fixed
