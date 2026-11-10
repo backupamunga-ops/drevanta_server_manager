@@ -6,6 +6,7 @@
 /bin/
 /dist/
 /web/node_modules/
+/web/.svelte-kit/
 /web/build/*
 !/web/build/.gitkeep
 
