@@ -235,12 +235,13 @@ What happens:
 - The `#token=…` part (the *fragment*) never travels to any network —
   your browser keeps fragments local. Drevanta additionally scrubs the
   token out of the address bar and browser history immediately after
-  prefilling the field, so it does not linger in autofill or session
-  restore.
-- The onboarding page shows the token field **already filled in**. If
-  you opened plain `http://127.0.0.1:18080/onboarding` instead (no
-  fragment), simply paste the raw token from your terminal into the
-  field.
+  loading it, so it does not linger in autofill or session restore.
+- The onboarding page replaces the token field with a green
+  **Setup token loaded** chip; the value is masked and never shown in
+  full. Click **Change** any time to enter a different token. If you
+  opened plain `http://127.0.0.1:18080/onboarding` instead (no
+  fragment), the manual field is shown directly: paste the raw token
+  from your terminal, or the whole setup link — both work.
 - Nothing is sent anywhere except to Drevanta itself, through the
   tunnel, on your own machine.
 
@@ -251,7 +252,8 @@ What happens:
 
 On the onboarding page:
 
-1. Check the pre-filled token (or paste the raw one) and continue.
+1. Confirm the loaded token (the green **Setup token loaded** chip, or
+   click **Change** to paste the raw one) and continue.
 2. Choose your **administrator username** (3–32 characters: letters,
    digits, dots, underscores, hyphens).
 3. Choose a **password of at least 12 characters** — a passphrase of
