@@ -109,14 +109,14 @@ export function rawTokenParamFromHash(hash) {
 }
 
 /**
- * Mask a token for display: prefix plus the last four characters. The
- * full value is never rendered once it has been loaded from a link.
+ * Mask a token for display in the compact token row, in the locked
+ * format `drv1_•••XXXX` (prefix, fixed dot run, last four characters).
+ * The full value is never rendered once it has been loaded from a link.
  *
  * @param {unknown} value
- * @returns {string} e.g. `drv1_a1b2…wxyz`, or an em dash for empty input
+ * @returns {string} e.g. `drv1_•••a1b2`, or an em dash for empty input
  */
 export function maskToken(value) {
         if (typeof value !== 'string' || value === '') return '—';
-        if (value.length <= 14) return value;
-        return value.slice(0, 9) + '…' + value.slice(-4);
+        return 'drv1_•••' + value.slice(-4);
 }

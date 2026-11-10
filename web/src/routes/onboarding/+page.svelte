@@ -31,7 +31,7 @@
         type Step = 'loading' | 'claim' | 'mfa-choice' | 'mfa-setup' | 'recovery' | 'done';
         type TokenMode = 'chip' | 'manual';
 
-        const DEFAULT_TOKEN_HINT = 'Printed by the installer. Paste the whole token or the setup link.';
+        const DEFAULT_TOKEN_HINT = 'Paste the whole token or the setup link.';
         const INCOMPLETE_TOKEN_HINT = 'That token looks incomplete — check you copied the whole setup link.';
 
         // Meter / strength colours indexed by scorePassword() level, exactly
@@ -92,23 +92,9 @@
         const showTokenReject = $derived(tokenMode === 'manual' && tokenRejectMsg !== '');
         const tokenValidManual = $derived(tokenMode === 'manual' && token.trim() !== '' && tokenErr === '');
         const chipMasked = $derived(maskToken(token));
-        const chipSupport = $derived(
-                (tokenOrigin === 'from your setup link' ? 'Automatically added from your setup link' : 'Pasted just now') +
-                        '. It will be checked when you create your account.'
-        );
-        const introCopy = $derived(
-                tokenMode === 'chip'
-                        ? 'Your setup token is loaded and has been removed from the address bar. Choose the administrator credentials for this instance.'
-                        : 'Paste the single-use claim token printed by the installer, then create the administrator account. The token expires and works exactly once.'
-        );
         const pwLevel = $derived(scorePassword(password));
         const strengthLabel = $derived(STRENGTH_LABELS[pwLevel]);
         const strengthColor = $derived(LEVEL_COLORS[pwLevel]);
-        const reqLenOk = $derived(password.length >= PASSWORD_MIN);
-        const reqDistinctOk = $derived(
-                password.length > 0 &&
-                        (username.trim() === '' || password.toLowerCase() !== username.trim().toLowerCase())
-        );
 
         $effect(() => {
                 if (statusChecked) return;
@@ -453,23 +439,6 @@
                                 </div>
                         </div>
 
-                        <span class="opill" title="Only reachable from the server itself. Connect through an SSH tunnel.">
-                                <svg
-                                        width="12"
-                                        height="12"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        aria-hidden="true"
-                                >
-                                        <rect x="4" y="11" width="16" height="10" rx="2.5" />
-                                        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-                                </svg>
-                                loopback-only<span class="sep">·</span>SSH tunnel
-                        </span>
                 </header>
 
                 <div class="odivider"></div>
@@ -486,48 +455,29 @@
                 {#if step === 'loading'}
                         <p class="oloading">loading onboarding state…</p>
                 {:else if step === 'claim'}
-                        <section class="ointro">
-                                <h2>Claim this instance</h2>
-                                <p>{introCopy}</p>
-                        </section>
-
-                        <form class="oform" novalidate onsubmit={submitClaim}>
+                        <form class="oform oform--claim" novalidate onsubmit={submitClaim}>
                                 {#if tokenMode === 'chip'}
-                                        <!-- approved green status: loaded ≠ verified; the backend
-                                                     checks the single-use token only on claim -->
-                                        <div class="ochip">
-                                                <span class="ochip__badge" aria-hidden="true">
-                                                        <svg
-                                                                width="13"
-                                                                height="13"
-                                                                viewBox="0 0 24 24"
-                                                                fill="none"
-                                                                stroke="currentColor"
-                                                                stroke-width="3.4"
-                                                                stroke-linecap="round"
-                                                                stroke-linejoin="round"
-                                                        >
-                                                                <path d="M20 6 9 17l-5-5" />
-                                                        </svg>
-                                                </span>
-                                                <span class="ochip__body">
-                                                        <span class="ochip__title">Setup token loaded</span>
-                                                        <span class="ochip__meta">
-                                                                <code>{chipMasked}</code>
-                                                                <span class="sep">·</span>
-                                                                {chipSupport}
-                                                        </span>
-                                                </span>
-                                                <button
-                                                        class="ochip__action"
-                                                        type="button"
-                                                        onclick={changeToken}
-                                                        aria-label="Enter a different claim token"
-                                                >
-                                                        Change
-                                                </button>
-                                        </div>
-                                {:else}
+                                                                                <!-- locked compact token row: loaded ≠ verified; the
+                                                                                     backend checks the single-use token only on claim -->
+                                                                                <div class="otoken-row" role="group" aria-label="Setup token loaded">
+                                                                                        <span class="otoken-row__badge" aria-hidden="true">
+                                                                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+                                                                                                        <path d="M20 6 9 17l-5-5" />
+                                                                                                </svg>
+                                                                                        </span>
+                                                                                        <span class="otoken-row__label">Token loaded</span>
+                                                                                        <span class="otoken-row__sep" aria-hidden="true">·</span>
+                                                                                        <code class="otoken-row__mask">{chipMasked}</code>
+                                                                                        <button
+                                                                                                class="otoken-row__action"
+                                                                                                type="button"
+                                                                                                onclick={changeToken}
+                                                                                                aria-label="Enter a different claim token"
+                                                                                        >
+                                                                                                Change
+                                                                                        </button>
+                                                                                </div>
+                                                                        {:else}
                                         <div
                                                 class="ofield"
                                                 class:has-error={showTokenErr || showTokenReject}
@@ -579,25 +529,22 @@
                                 {/if}
 
                                 <div class="ofield" class:has-error={userTouched && userErr !== ''}>
-                                        <label class="olabel" for="username">Administrator username</label>
+                                        <label class="olabel" for="username">Admin username</label>
                                         <input
                                                 class="oinput"
                                                 id="username"
                                                 name="username"
                                                 type="text"
-                                                placeholder="e.g. root.admin"
+                                                placeholder="e.g. rootadmin"
                                                 autocomplete="username"
                                                 autocapitalize="off"
                                                 spellcheck="false"
-                                                aria-describedby="user-hint user-err"
+                                                aria-describedby="user-err"
                                                 aria-invalid={userTouched && userErr !== ''}
                                                 bind:value={username}
                                                 bind:this={usernameEl}
                                                 onblur={() => (userTouched = true)}
                                         />
-                                        <p class="ohint" id="user-hint">
-                                                3–32 characters · letters, numbers, dots, dashes, underscores.
-                                        </p>
                                         <p class="oerr" id="user-err" hidden={!(userTouched && userErr !== '')}>{userErr}</p>
                                 </div>
 
@@ -615,7 +562,7 @@
                                                         placeholder="At least 12 characters"
                                                         autocomplete="new-password"
                                                         maxlength={PASSWORD_MAX}
-                                                        aria-describedby="pw-hint pw-err"
+                                                        aria-describedby="pw-err"
                                                         aria-invalid={pwTouched && pwErr !== ''}
                                                         bind:value={password}
                                                         bind:this={passwordEl}
@@ -667,45 +614,29 @@
                                                 </button>
                                         </div>
 
-                                        <div class="ometer" aria-hidden="true">
-                                                <span class="ometer__bar" class:on={pwLevel >= 1} style:background={pwLevel >= 1 ? strengthColor : ''}></span>
-                                                <span class="ometer__bar" class:on={pwLevel >= 2} style:background={pwLevel >= 2 ? strengthColor : ''}></span>
-                                                <span class="ometer__bar" class:on={pwLevel >= 3} style:background={pwLevel >= 3 ? strengthColor : ''}></span>
-                                                <span class="ometer__bar" class:on={pwLevel >= 4} style:background={pwLevel >= 4 ? strengthColor : ''}></span>
-                                        </div>
-
-                                        <div class="opw-foot">
-                                                <ul class="oreqs">
-                                                        <li class="oreq" class:ok={reqLenOk}>
-                                                                <span class="oreq__dot" aria-hidden="true">
-                                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-                                                                </span>
-                                                                At least 12 characters
-                                                        </li>
-                                                        <li class="oreq" class:ok={reqDistinctOk}>
-                                                                <span class="oreq__dot" aria-hidden="true">
-                                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-                                                                </span>
-                                                                Different from your username
-                                                        </li>
-                                                </ul>
+                                        <div class="ometer-row">
+                                                <div class="ometer" aria-hidden="true">
+                                                        <span class="ometer__bar" class:on={pwLevel >= 1} style:background={pwLevel >= 1 ? strengthColor : ''}></span>
+                                                        <span class="ometer__bar" class:on={pwLevel >= 2} style:background={pwLevel >= 2 ? strengthColor : ''}></span>
+                                                        <span class="ometer__bar" class:on={pwLevel >= 3} style:background={pwLevel >= 3 ? strengthColor : ''}></span>
+                                                        <span class="ometer__bar" class:on={pwLevel >= 4} style:background={pwLevel >= 4 ? strengthColor : ''}></span>
+                                                </div>
                                                 <span class="ostrength" aria-live="polite" style:color={pwLevel > 0 ? strengthColor : ''}>{strengthLabel}</span>
                                         </div>
 
                                         <p class="ohint ohint--warn" hidden={!capsOn}>Caps Lock is on.</p>
-                                        <p class="ohint" id="pw-hint">Stored only as an argon2id hash.</p>
                                         <p class="oerr" id="pw-err" hidden={!(pwTouched && pwErr !== '')}>{pwErr}</p>
                                 </div>
 
                                 <div class="ofield" class:has-error={confirmTouched && confirmErr !== ''}>
-                                        <label class="olabel" for="password2">Repeat password</label>
+                                        <label class="olabel" for="password2">Confirm password</label>
                                         <div class="ocontrol">
                                                 <input
                                                         class="oinput"
                                                         id="password2"
                                                         name="password2"
                                                         type={showPw2 ? 'text' : 'password'}
-                                                        placeholder="Type it again"
+                                                        placeholder="Repeat your password"
                                                         autocomplete="new-password"
                                                         maxlength={PASSWORD_MAX}
                                                         aria-describedby="confirm-err"
@@ -750,8 +681,7 @@
 
                         <div class="ometa">
                                 <span>argon2id</span><span class="dot">·</span>
-                                <span>token single-use</span><span class="dot">·</span>
-                                <span>loopback only</span>
+                                <span>single-use setup token</span>
                         </div>
 
                         <details class="odisclosure">
@@ -762,11 +692,13 @@
                                         </svg>
                                 </summary>
                                 <p>
-                                        On the server, the installer prints a one-time link like
-                                        <code>http://127.0.0.1:18080/onboarding#token=drv1_…</code>. Forward the port first —
-                                        <code>ssh -N -L 18080:127.0.0.1:8080 user@server</code> — then open that link. The token is
-                                        consumed on success and cannot be reused. If the link is lost or expired, run
-                                        <code>sudo drevanta claim regenerate</code> on the server for a fresh one.
+                                        The installer prints a one-time link. With public HTTPS it is
+                                        <code>https://YOUR_VPS_IP/onboarding#token=drv1_…</code> — open it directly in your
+                                        browser. Without HTTPS, run <code>ssh -L 18080:127.0.0.1:8080 user@server</code> on
+                                        <em>your computer</em> and open <code>http://127.0.0.1:18080/onboarding#token=…</code>.
+                                        Paste the whole link (or just the token) above. The token is consumed on success and
+                                        cannot be reused. If it expired, run <code>sudo drevanta claim regenerate</code> on
+                                        the server for a fresh one.
                                 </p>
                         </details>
                 {:else if step === 'mfa-choice'}
@@ -785,8 +717,8 @@
 
                                 <div class="owarn-box">
                                         <strong>Skipping MFA lowers security.</strong> Without a second factor, knowing the
-                                        password alone is enough to sign in. You can only reach the console through an SSH
-                                        tunnel, which limits exposure, but the account will not be 2FA-protected.
+                                                                                password alone is enough to sign in from anywhere the console is reachable,
+                                                                                and the account will not be 2FA-protected.
                                 </div>
                                 <label class="ocheck-row">
                                         <input type="checkbox" bind:checked={riskAcknowledged} />
@@ -886,7 +818,7 @@
                 min-height: 100vh;
                 display: grid;
                 place-items: center;
-                padding: 36px 20px;
+                padding: 22px 16px;
                 background: #06080b;
                 color: var(--text);
                 font-size: 15px;
@@ -941,9 +873,9 @@
         .obcard {
                 position: relative;
                 width: 100%;
-                max-width: 600px;
-                padding: 28px 30px 24px;
-                border-radius: 18px;
+                max-width: 520px;
+                padding: 20px 22px 18px;
+                border-radius: 16px;
                 border: 1px solid var(--line);
                 background:
                         radial-gradient(120% 100% at 50% 0%, rgba(61, 220, 151, 0.055), transparent 56%),
@@ -1021,35 +953,9 @@
                 letter-spacing: 0.02em;
         }
 
-        .opill {
-                display: inline-flex;
-                align-items: center;
-                gap: 7px;
-                padding: 6px 11px;
-                border-radius: 999px;
-                font-family: var(--mono);
-                font-size: 11px;
-                letter-spacing: 0.02em;
-                color: #9aabb9;
-                background: rgba(255, 255, 255, 0.028);
-                border: 1px solid var(--line);
-                white-space: nowrap;
-        }
-
-        .opill svg {
-                color: var(--accent);
-                opacity: 0.85;
-                flex: 0 0 auto;
-        }
-
-        .opill .sep {
-                opacity: 0.4;
-                margin: 0 1px;
-        }
-
         .odivider {
                 height: 1px;
-                margin: 22px 0 20px;
+                margin: 12px 0 12px;
                 background: linear-gradient(90deg, transparent, var(--line) 10%, var(--line) 90%, transparent);
         }
 
@@ -1077,13 +983,13 @@
         /* ---------- intro / loading / error ---------- */
         .ointro h2 {
                 margin: 0;
-                font-size: 19px;
+                font-size: 17px;
                 font-weight: 600;
                 letter-spacing: -0.01em;
         }
 
         .ointro p {
-                margin: 7px 0 0;
+                margin: 5px 0 0;
                 font-size: 13.5px;
                 line-height: 1.62;
                 color: var(--muted);
@@ -1127,14 +1033,18 @@
         .oform {
                 display: flex;
                 flex-direction: column;
-                gap: 17px;
-                margin-top: 22px;
+                gap: 12px;
+                margin-top: 0;
+        }
+
+        .oform--claim {
+                margin-top: 2px;
         }
 
         .ofield {
                 display: flex;
                 flex-direction: column;
-                gap: 8px;
+                gap: 6px;
         }
 
         .olabel-row {
@@ -1191,14 +1101,14 @@
         }
 
         .ocontrol > .oinput {
-                padding-right: 46px;
+                padding-right: 42px;
         }
 
         .oinput {
                 width: 100%;
-                min-height: 46px;
-                padding: 12px 13px;
-                border-radius: 10px;
+                min-height: 40px;
+                padding: 9px 11px;
+                border-radius: 9px;
                 border: 1px solid var(--line);
                 background: #080c11;
                 color: var(--text);
@@ -1319,24 +1229,25 @@
                 box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1);
         }
 
-        /* ---------- token chip (locked wording) ---------- */
-        .ochip {
+        /* ---------- compact token row (locked wording) ---------- */
+        .otoken-row {
                 display: flex;
                 align-items: center;
-                gap: 12px;
-                padding: 12px 14px;
-                border-radius: 12px;
+                gap: 8px;
+                flex-wrap: wrap;
+                padding: 8px 11px;
+                border-radius: 10px;
                 border: 1px solid rgba(61, 220, 151, 0.3);
                 background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.035));
                 box-shadow:
                         0 0 0 1px rgba(0, 0, 0, 0.3) inset,
-                        0 12px 34px -22px rgba(61, 220, 151, 0.95);
+                        0 10px 28px -20px rgba(61, 220, 151, 0.95);
                 animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
         }
 
-        .ochip__badge {
-                width: 26px;
-                height: 26px;
+        .otoken-row__badge {
+                width: 18px;
+                height: 18px;
                 flex: 0 0 auto;
                 border-radius: 50%;
                 display: grid;
@@ -1358,48 +1269,36 @@
                 }
         }
 
-        .ochip__body {
-                display: flex;
-                flex-direction: column;
-                gap: 3px;
-                min-width: 0;
-                flex: 1;
-        }
-
-        .ochip__title {
-                font-size: 13px;
+        .otoken-row__label {
+                font-size: 12.5px;
                 font-weight: 600;
                 color: #c8f4de;
-                letter-spacing: -0.005em;
+                white-space: nowrap;
         }
 
-        .ochip__meta {
-                display: flex;
-                align-items: center;
-                gap: 6px;
-                flex-wrap: wrap;
-                font-family: var(--mono);
-                font-size: 11px;
-                color: var(--dim);
-                line-height: 1.5;
-        }
-
-        .ochip__meta code {
-                font: inherit;
-                color: #8fb3a5;
-        }
-
-        .ochip__meta .sep {
+        .otoken-row__sep {
                 opacity: 0.4;
+                color: var(--dim);
         }
 
-        .ochip__action {
+        .otoken-row__mask {
+                font-family: var(--mono);
+                font-size: 11.5px;
+                color: #8fb3a5;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                min-width: 0;
+                flex: 1 1 auto;
+        }
+
+        .otoken-row__action {
                 flex: 0 0 auto;
                 border: 1px solid var(--line);
                 background: rgba(255, 255, 255, 0.03);
                 color: var(--muted);
-                border-radius: 8px;
-                padding: 6px 11px;
+                border-radius: 7px;
+                padding: 5px 10px;
                 cursor: pointer;
                 font: inherit;
                 font-family: var(--mono);
@@ -1411,18 +1310,18 @@
                         background 0.15s;
         }
 
-        .ochip__action:hover {
+        .otoken-row__action:hover {
                 color: var(--text);
                 border-color: var(--line-hi);
                 background: rgba(255, 255, 255, 0.06);
         }
 
-        .ochip__action:focus-visible {
+        .otoken-row__action:focus-visible {
                 outline: 2px solid rgba(61, 220, 151, 0.6);
                 outline-offset: 2px;
         }
 
-        /* ---------- password meter ---------- */
+                /* ---------- password meter ---------- */
         .ometer {
                 display: flex;
                 gap: 5px;
@@ -1437,66 +1336,11 @@
                 transition: background 0.25s ease;
         }
 
-        .opw-foot {
-                display: flex;
-                align-items: flex-start;
-                justify-content: space-between;
-                gap: 14px;
-                margin-top: 2px;
-        }
-
-        .oreqs {
-                list-style: none;
-                margin: 0;
-                padding: 0;
-                display: flex;
-                flex-direction: column;
-                gap: 5px;
-        }
-
-        .oreq {
+        .ometer-row {
                 display: flex;
                 align-items: center;
-                gap: 7px;
-                font-size: 12px;
-                color: var(--dim);
-                transition: color 0.18s ease;
-        }
-
-        .oreq__dot {
-                width: 14px;
-                height: 14px;
-                flex: 0 0 auto;
-                border-radius: 50%;
-                display: grid;
-                place-items: center;
-                border: 1px solid #2a3542;
-                color: var(--accent);
-                transition:
-                        background 0.18s,
-                        border-color 0.18s;
-        }
-
-        .oreq__dot svg {
-                opacity: 0;
-                transform: scale(0.55);
-                transition:
-                        opacity 0.18s,
-                        transform 0.18s;
-        }
-
-        .oreq.ok {
-                color: #a9e8c9;
-        }
-
-        .oreq.ok .oreq__dot {
-                background: rgba(61, 220, 151, 0.16);
-                border-color: rgba(61, 220, 151, 0.5);
-        }
-
-        .oreq.ok .oreq__dot svg {
-                opacity: 1;
-                transform: none;
+                gap: 10px;
+                margin-top: 2px;
         }
 
         .ostrength {
@@ -1513,8 +1357,8 @@
         .obtn {
                 position: relative;
                 width: 100%;
-                min-height: 47px;
-                margin-top: 5px;
+                min-height: 42px;
+                margin-top: 2px;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
@@ -1611,7 +1455,7 @@
                 justify-content: center;
                 gap: 8px;
                 flex-wrap: wrap;
-                margin-top: 18px;
+                margin-top: 10px;
                 font-family: var(--mono);
                 font-size: 10.5px;
                 letter-spacing: 0.05em;
@@ -1624,8 +1468,8 @@
         }
 
         .odisclosure {
-                margin-top: 16px;
-                padding-top: 14px;
+                margin-top: 12px;
+                padding-top: 10px;
                 border-top: 1px solid var(--line-soft);
         }
 
@@ -1682,8 +1526,8 @@
         .oactions {
                 display: flex;
                 flex-direction: column;
-                gap: 14px;
-                margin-top: 18px;
+                gap: 12px;
+                margin-top: 14px;
         }
 
         .owarn-box {
@@ -1778,40 +1622,24 @@
         /* ---------- responsive ---------- */
         @media (max-width: 520px) {
                 .ob {
-                        padding: 16px 12px;
+                        padding: 12px 10px;
                 }
 
                 .obcard {
-                        padding: 22px 18px 20px;
-                        border-radius: 14px;
+                        padding: 16px 14px 14px;
+                        border-radius: 13px;
                 }
 
                 .ohead {
                         gap: 10px;
                 }
 
-                .opill {
-                        font-size: 10.5px;
-                        padding: 5px 9px;
-                }
-
-                .opw-foot {
-                        flex-direction: column;
-                        gap: 8px;
-                }
-
-                .ostrength {
-                        align-self: flex-end;
-                }
-
-                .ochip {
+                .ometer-row {
                         flex-wrap: wrap;
                 }
 
-                .ochip__action {
-                        width: 100%;
-                        text-align: center;
-                        margin-top: 2px;
+                .ostrength {
+                        margin-left: auto;
                 }
         }
 
@@ -1821,8 +1649,8 @@
                 .ob::after,
                 .obcard,
                 .obcard::before,
-                .ochip,
-                .ochip__badge,
+                .otoken-row,
+                .otoken-row__badge,
                 .odone,
                 .odone__icon {
                         animation-duration: 0.001ms !important;

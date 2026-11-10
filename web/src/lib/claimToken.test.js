@@ -127,9 +127,9 @@ test('rawTokenParamFromHash returns the raw value even when malformed', () => {
         assert.equal(rawTokenParamFromHash(undefined), '');
 });
 
-test('maskToken shows only prefix and last four characters', () => {
-        assert.equal(maskToken(TOKEN), 'drv1_AAAA…AAAA');
-        assert.equal(maskToken('drv1_short'), 'drv1_short'); // short values shown as-is
+test('maskToken shows the locked drv1_•••XXXX row format', () => {
+        assert.equal(maskToken(TOKEN), 'drv1_•••AAAA');
+        assert.equal(maskToken('drv1_short'), 'drv1_•••hort'); // even short values only show the tail
         assert.equal(maskToken(''), '—');
         assert.equal(maskToken(null), '—');
         // the masked value must never contain the full token
