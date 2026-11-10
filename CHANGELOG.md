@@ -4,6 +4,16 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.3.5-onboard-ui] — 2026-11-10
+
+Fix: untouched field errors were rendered on the claim form. The port
+kept the `hidden` attribute for error paragraphs and the caps-lock hint
+but dropped the prototype's `[hidden]{display:none !important}` guard,
+and `.oerr`'s `display:flex` outranked the UA default — so "Choose an
+administrator username." and friends showed before any interaction.
+The guard is restored (scoped to the onboarding page); validation
+logic, wording and all other behaviour are unchanged.
+
 ## [0.3.4-onboard-ui] — 2026-11-10
 
 Sprint 2.7: the approved onboarding UI/UX prototype is now the real

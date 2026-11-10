@@ -930,6 +930,13 @@
                 border: 0;
         }
 
+        /* As in the prototype: the hidden attribute must always win over
+           component display values (.oerr uses display:flex, the hint rows
+           are plain blocks) so untouched error paragraphs truly vanish. */
+        .ob [hidden] {
+                display: none !important;
+        }
+
         /* ---------- card ---------- */
         .obcard {
                 position: relative;
