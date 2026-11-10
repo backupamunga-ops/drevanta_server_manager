@@ -49,3 +49,74 @@ export function urlWithoutHash(loc) {
         if (!loc || typeof loc.pathname !== 'string') return '';
         return loc.pathname + (typeof loc.search === 'string' ? loc.search : '');
 }
+
+/**
+ * Shape check for a claim token: `drv1_` followed by base64url
+ * characters. Deliberately loose about length — the daemon decides
+ * validity and this only catches obvious garbage so the UI can warn
+ * before a round trip. No token is ever verified here.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidTokenShape(value) {
+        return typeof value === 'string' && /^drv1_[A-Za-z0-9_-]{16,}$/.test(value);
+}
+
+/**
+ * Extract a claim token from free-form pasted input: either the raw
+ * token or a complete setup link (`…#token=…` or `…?token=…`, as the
+ * installer prints it). Whitespace a mail client or terminal wrapped
+ * into the value is stripped; everything from the next parameter or
+ * quote delimiter onwards is cut. Lenient by design — the backend
+ * remains the authority on whether the value is usable.
+ *
+ * @param {unknown} raw - pasted text
+ * @returns {string}
+ */
+export function tokenFromPastedInput(raw) {
+        let v = typeof raw === 'string' ? raw.trim() : '';
+        if (v === '') return '';
+        const idx = v.indexOf('token=');
+        if (idx !== -1) {
+                // Complete setup link: take everything after the first
+                // `token=` occurrence (tokens themselves can never contain
+                // the '=' sign), rejoin wrapped lines, cut at delimiters.
+                v = v.slice(idx + 'token='.length).replace(/\s+/g, '');
+                v = v.split(/[&#"']/)[0];
+        } else {
+                v = v.replace(/\s+/g, '');
+        }
+        return v;
+}
+
+/**
+ * The raw value of the `token` parameter in a fragment, however it
+ * parses. Used to distinguish "no token in the URL" from "a malformed
+ * token in the URL" so the UI can show a helpful error instead of
+ * silently falling back to manual entry. '' when the fragment carries
+ * no token parameter at all.
+ *
+ * @param {unknown} hash - value of location.hash
+ * @returns {string}
+ */
+export function rawTokenParamFromHash(hash) {
+        if (typeof hash !== 'string' || hash === '') return '';
+        const h = hash.startsWith('#') ? hash.slice(1) : '';
+        if (h === '') return '';
+        const params = new URLSearchParams(h);
+        return params.get('token') ?? '';
+}
+
+/**
+ * Mask a token for display: prefix plus the last four characters. The
+ * full value is never rendered once it has been loaded from a link.
+ *
+ * @param {unknown} value
+ * @returns {string} e.g. `drv1_a1b2…wxyz`, or an em dash for empty input
+ */
+export function maskToken(value) {
+        if (typeof value !== 'string' || value === '') return '—';
+        if (value.length <= 14) return value;
+        return value.slice(0, 9) + '…' + value.slice(-4);
+}

@@ -1,28 +1,39 @@
 <script lang="ts">
         import '../app.css';
+        import { page } from '$app/state';
 
         let { children } = $props();
+
+        // The onboarding wizard renders the approved standalone full-screen
+        // design (its own centered card, background glow and grid), so it
+        // opts out of the dashboard shell. Login and the dashboard keep the
+        // shell unchanged.
+        const bare = $derived(page.url.pathname === '/onboarding' || page.url.pathname.startsWith('/onboarding/'));
 </script>
 
-<div class="shell">
-        <header>
-                <div class="brand">
-                        <span class="brand-mark" aria-hidden="true"></span>
-                        <span class="brand-name">Drevanta</span>
-                        <span class="brand-sub">server console</span>
-                </div>
-                <div class="conn">loopback-only · SSH tunnel</div>
-        </header>
+{#if bare}
+        {@render children()}
+{:else}
+        <div class="shell">
+                <header>
+                        <div class="brand">
+                                <span class="brand-mark" aria-hidden="true"></span>
+                                <span class="brand-name">Drevanta</span>
+                                <span class="brand-sub">server console</span>
+                        </div>
+                        <div class="conn">loopback-only · SSH tunnel</div>
+                </header>
 
-        <main>
-                {@render children()}
-        </main>
+                <main>
+                        {@render children()}
+                </main>
 
-        <footer>
-                <span>Drevanta · private server console</span>
-                <span>loopback-only · SSH tunnel required</span>
-        </footer>
-</div>
+                <footer>
+                        <span>Drevanta · private server console</span>
+                        <span>loopback-only · SSH tunnel required</span>
+                </footer>
+        </div>
+{/if}
 
 <style>
         .shell {

@@ -4,6 +4,76 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.3.4-onboard-ui] — 2026-11-10
+
+Sprint 2.7: the approved onboarding UI/UX prototype is now the real
+onboarding. The claim wizard reproduces the prototype's dark design
+(grid + glow, centered card, green accents) with the locked "Setup
+token loaded" status, while the backend API, token semantics and the
+real MFA → recovery-code journey are unchanged.
+
+### Added
+- **Approved claim design** — the onboarding page now renders the
+  approved standalone full-screen design: dark background with ambient
+  green glow and subtle grid, centered card with brand header and
+  loopback-only pill, green token-status chip, password strength meter
+  with live requirement checks, password visibility toggles, secure
+  client-side password generation, caps-lock hint, field-level errors
+  with focus management, aria-live announcements, disclosure help and
+  responsive/reduced-motion behaviour. The dashboard shell is unchanged
+  for /login and /; only /onboarding renders bare.
+- **Locked token status** — a token loaded from the setup link replaces
+  the token input with the approved green chip: **Setup token loaded**,
+  "Automatically added from your setup link. It will be checked when you
+  create your account." The wording deliberately does not claim backend
+  verification — the single-use token is validated and consumed only by
+  a successful claim, exactly as before. No pre-flight verification API
+  was added. A Change button reveals manual token entry at any time.
+- **Manual fallback parity** — the manual input accepts a raw token or
+  the complete setup link (whitespace a mail client wrapped into the
+  value is healed, delimiters cut); a valid paste is adopted into the
+  chip ("Pasted just now"); a malformed link value keeps the raw text
+  with an explanatory hint.
+- **Backend-rejection handling** — expired/used/invalid tokens keep the
+  tried value and the rest of the form, explain the reason, and point at
+  the documented `sudo drevanta claim regenerate` fallback. Username and
+  password survive every validation or claim failure.
+- **Client-side validators mirror the daemon** — username 3–32 chars
+  `[a-zA-Z0-9._-]`, password 12–128 chars (the 128 max is new, matching
+  the backend), plus the prototype's "different from username" check.
+  The backend remains authoritative.
+
+### Changed
+- The illustrative "Administrator created" screen of the prototype is
+  intentionally not used as an end state: after a successful claim the
+  wizard continues into the real MFA enrolment, recovery-code display
+  and dashboard hand-off, restyled with the same design language. The
+  old wizard step chips are dropped (the prototype has no step
+  indicator).
+
+### Security
+- The token is held in component memory only — never in localStorage,
+  sessionStorage, cookies, logs or analytics — and the fragment is still
+  scrubbed from the address bar and history immediately on load
+  (Performance Navigation fallback retained). Opening the onboarding
+  page still never consumes the token; no new API surface exists.
+- All existing protections are untouched: single-use/expiring hashed
+  tokens, argon2id, origin guards, rate limits, audit logging.
+
+### Tests
+- Web unit tests 12 → 28: token-shape checks, setup-link paste healing
+  (wrapped lines, query/fragment links, delimiters), raw fragment
+  param extraction, token masking, username/password/confirm/token
+  validators incl. daemon boundaries, exact prototype strength scoring.
+- Browser E2E against a throwaway local instance: setup link → chip +
+  scrubbed address bar (exactly one `history.replaceState`), Change →
+  manual, full-link paste → chip, field-level validation with preserved
+  token/form state, real claim → TOTP verify → 10 recovery codes →
+  acknowledgement → dashboard; rejected (rotated) token shows the
+  regenerate fallback with the form intact; malformed fragment falls
+  back to manual; no token in storage; mobile layout and keyboard tab
+  order verified.
+
 ## [0.3.3-claim-regen] — 2026-11-10
 
 Sprint 2.6: onboarding completion & documentation. Extends the locked

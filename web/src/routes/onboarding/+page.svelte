@@ -1,4 +1,5 @@
 <script lang="ts">
+        import { tick } from 'svelte';
         import { goto } from '$app/navigation';
         import QRCode from 'qrcode';
         import {
@@ -8,40 +9,117 @@
                 type MfaSetup,
                 type MfaVerified
         } from '$lib/api';
-        import { hashFromUrl, tokenFromHash, urlWithoutHash } from '$lib/claimToken.js';
+        import {
+                hashFromUrl,
+                isValidTokenShape,
+                maskToken,
+                rawTokenParamFromHash,
+                tokenFromPastedInput,
+                urlWithoutHash
+        } from '$lib/claimToken.js';
+        import {
+                PASSWORD_MAX,
+                PASSWORD_MIN,
+                STRENGTH_LABELS,
+                confirmError,
+                passwordError,
+                scorePassword,
+                tokenError,
+                usernameError
+        } from '$lib/onboardingValidate.js';
 
         type Step = 'loading' | 'claim' | 'mfa-choice' | 'mfa-setup' | 'recovery' | 'done';
+        type TokenMode = 'chip' | 'manual';
+
+        const DEFAULT_TOKEN_HINT = 'Printed by the installer. Paste the whole token or the setup link.';
+        const INCOMPLETE_TOKEN_HINT = 'That token looks incomplete — check you copied the whole setup link.';
+
+        // Meter / strength colours indexed by scorePassword() level, exactly
+        // as in the approved prototype (1 danger, 2 warn, 3 mint, 4 accent).
+        const LEVEL_COLORS = ['', 'var(--danger)', 'var(--warn)', '#8fe6c0', 'var(--accent)'] as const;
 
         let step = $state<Step>('loading');
         let busy = $state(false);
-        let error = $state('');
+        let stepError = $state('');
+        let showLoginLink = $state(false);
         let statusChecked = $state(false);
-        let tokenFromLink = $state(false);
+        let liveMsg = $state('');
 
-        // Claim form
+        // --- claim form ----------------------------------------------------
+        // The token lives in component memory only: never in localStorage,
+        // sessionStorage, cookies, logs or analytics. It is consumed by the
+        // backend exclusively on a successful claim.
+        let tokenMode = $state<TokenMode>('manual');
         let token = $state('');
+        let tokenOrigin = $state('');
+        let tokenTouched = $state(false);
+        let tokenHint = $state(DEFAULT_TOKEN_HINT);
+        let tokenRejectMsg = $state('');
+
         let username = $state('');
         let password = $state('');
         let password2 = $state('');
+        let userTouched = $state(false);
+        let pwTouched = $state(false);
+        let confirmTouched = $state(false);
+        let showPw = $state(false);
+        let showPw2 = $state(false);
+        let capsOn = $state(false);
 
-        // MFA enrolment
+        // --- MFA enrolment ---------------------------------------------------
         let totpSecret = $state('');
-        let otpauthUri = $state('');
         let qrSvg = $state('');
         let totpCode = $state('');
 
-        // Recovery codes
+        // --- recovery codes --------------------------------------------------
         let recoveryCodes = $state<string[]>([]);
         let codesSaved = $state(false);
 
-        // Skip path
+        // --- skip path -------------------------------------------------------
         let riskAcknowledged = $state(false);
+
+        // Element refs for focus management.
+        let tokenEl = $state<HTMLInputElement | null>(null);
+        let usernameEl = $state<HTMLInputElement | null>(null);
+        let passwordEl = $state<HTMLInputElement | null>(null);
+        let password2El = $state<HTMLInputElement | null>(null);
+
+        const userErr = $derived(usernameError(username));
+        const pwErr = $derived(passwordError(password, username));
+        const confirmErr = $derived(confirmError(password2, password));
+        const tokenErr = $derived(tokenMode === 'manual' ? tokenError(token) : '');
+        const showTokenErr = $derived(tokenMode === 'manual' && tokenRejectMsg === '' && tokenTouched && tokenErr !== '');
+        const showTokenReject = $derived(tokenMode === 'manual' && tokenRejectMsg !== '');
+        const tokenValidManual = $derived(tokenMode === 'manual' && token.trim() !== '' && tokenErr === '');
+        const chipMasked = $derived(maskToken(token));
+        const chipSupport = $derived(
+                (tokenOrigin === 'from your setup link' ? 'Automatically added from your setup link' : 'Pasted just now') +
+                        '. It will be checked when you create your account.'
+        );
+        const introCopy = $derived(
+                tokenMode === 'chip'
+                        ? 'Your setup token is loaded and has been removed from the address bar. Choose the administrator credentials for this instance.'
+                        : 'Paste the single-use claim token printed by the installer, then create the administrator account. The token expires and works exactly once.'
+        );
+        const pwLevel = $derived(scorePassword(password));
+        const strengthLabel = $derived(STRENGTH_LABELS[pwLevel]);
+        const strengthColor = $derived(LEVEL_COLORS[pwLevel]);
+        const reqLenOk = $derived(password.length >= PASSWORD_MIN);
+        const reqDistinctOk = $derived(
+                password.length > 0 &&
+                        (username.trim() === '' || password.toLowerCase() !== username.trim().toLowerCase())
+        );
 
         $effect(() => {
                 if (statusChecked) return;
                 statusChecked = true;
-                route();
+                void route();
         });
+
+        function announce(msg: string) {
+                liveMsg = '';
+                setTimeout(() => (liveMsg = msg), 40);
+        }
 
         // The setup-link fragment may be erased by the client router before
         // this component's effects run. The Performance Navigation entry
@@ -59,24 +137,34 @@
                 return '';
         }
 
-        // One-time setup link (…/onboarding#token=drv1_…): prefill the claim
-        // token field, then erase the fragment from the address bar and the
+        // One-time setup link (…/onboarding#token=drv1_…): retain the token
+        // in memory, then erase the fragment from the address bar and the
         // current history entry. history.replaceState never adds a history
         // entry and never sends anything over the network; fragments are
         // stripped by the browser before any request, so the token stays on
-        // this machine end to end. No analytics or external scripts exist to
-        // leak it to.
+        // this machine end to end. No token-verification call happens here:
+        // the backend validates and burns the single-use token only when the
+        // administrator account is created. A malformed fragment value falls
+        // back to manual entry with the raw value kept for correction.
         function consumeSetupLinkToken() {
                 if (typeof location === 'undefined') return;
-                const fromLink = tokenFromHash(initialHash());
-                if (!fromLink) return;
-                token = fromLink;
-                tokenFromLink = true;
+                const raw = rawTokenParamFromHash(initialHash());
+                if (raw === '') return; // no token parameter: pristine manual entry
                 history.replaceState(history.state, '', urlWithoutHash(location));
+                const cleaned = tokenFromPastedInput(raw);
+                if (isValidTokenShape(cleaned)) {
+                        adoptToken(cleaned, 'from your setup link');
+                } else {
+                        token = cleaned;
+                        tokenMode = 'manual';
+                        tokenTouched = true;
+                        tokenHint = INCOMPLETE_TOKEN_HINT;
+                }
         }
 
         async function route() {
-                error = '';
+                stepError = '';
+                showLoginLink = false;
                 consumeSetupLinkToken();
                 try {
                         const s = await fetchOnboardingStatus();
@@ -100,46 +188,153 @@
                         }
                         step = 'claim';
                 } catch (err) {
-                        error = err instanceof Error ? err.message : String(err);
+                        stepError = err instanceof Error ? err.message : String(err);
                         step = 'claim';
+                }
+                if (step !== 'claim') return;
+                await tick();
+                if (tokenMode === 'chip') {
+                        usernameEl?.focus({ preventScroll: true });
+                        announce('Setup token loaded. Now create the administrator account.');
+                } else if (token === '') {
+                        tokenEl?.focus({ preventScroll: true });
                 }
         }
 
+        // --- token state transitions -----------------------------------------
+
+        /** Show the approved green "Setup token loaded" chip. */
+        function adoptToken(value: string, origin: string) {
+                token = value;
+                tokenOrigin = origin;
+                tokenMode = 'chip';
+                tokenTouched = false;
+                tokenRejectMsg = '';
+                tokenHint = DEFAULT_TOKEN_HINT;
+        }
+
+        /** Fall back to the manual token input. */
+        function useManualToken(prefill: string, focus: boolean) {
+                token = prefill;
+                tokenMode = 'manual';
+                if (focus) void tick().then(() => tokenEl?.focus({ preventScroll: true }));
+        }
+
+        /** "Change" on the chip: clear and reveal manual entry, focused. */
+        function changeToken() {
+                tokenTouched = false;
+                tokenHint = DEFAULT_TOKEN_HINT;
+                useManualToken('', true);
+        }
+
+        function onTokenInput(e: Event) {
+                const el = e.currentTarget as HTMLInputElement;
+                let v = el.value;
+                // Accept a complete setup link pasted or typed into the field.
+                if (v.includes('token=')) v = tokenFromPastedInput(v);
+                token = v;
+                if (el.value !== v) el.value = v;
+                tokenRejectMsg = '';
+        }
+
+        function onTokenPaste(e: ClipboardEvent) {
+                const text = e.clipboardData?.getData('text') ?? '';
+                if (text === '') return; // nothing readable: let the browser paste normally
+                e.preventDefault();
+                const v = tokenFromPastedInput(text);
+                token = v;
+                tokenRejectMsg = '';
+                if (isValidTokenShape(v)) {
+                        adoptToken(v, 'pasted just now');
+                        announce('Setup token loaded. Now create the administrator account.');
+                        void tick().then(() => usernameEl?.focus({ preventScroll: true }));
+                } else {
+                        tokenTouched = true;
+                }
+        }
+
+        // --- claim submission --------------------------------------------------
+
         async function submitClaim(e: SubmitEvent) {
                 e.preventDefault();
-                error = '';
-                if (password !== password2) {
-                        error = 'Passwords do not match.';
+                tokenTouched = true;
+                userTouched = true;
+                pwTouched = true;
+                confirmTouched = true;
+                stepError = '';
+                showLoginLink = false;
+
+                if (tokenMode === 'manual' && tokenErr !== '') {
+                        void tick().then(() => tokenEl?.focus({ preventScroll: true }));
                         return;
                 }
+                if (userErr !== '') {
+                        void tick().then(() => usernameEl?.focus({ preventScroll: true }));
+                        return;
+                }
+                if (pwErr !== '') {
+                        void tick().then(() => passwordEl?.focus({ preventScroll: true }));
+                        return;
+                }
+                if (confirmErr !== '') {
+                        void tick().then(() => password2El?.focus({ preventScroll: true }));
+                        return;
+                }
+
                 busy = true;
                 try {
-                        await postJSON('/api/v1/onboarding/claim', { token: token.trim(), username, password });
+                        await postJSON('/api/v1/onboarding/claim', {
+                                token: token.trim(),
+                                username: username.trim(),
+                                password
+                        });
                         await beginMfaSetup();
                 } catch (err) {
-                        if (err instanceof ApiError) {
-                                if (err.code === 'token_expired') {
-                                        error = 'The claim token has expired. Ask the installer to issue a new one (drevantad claim init).';
-                                } else if (err.code === 'token_used' || err.code === 'invalid_token') {
-                                        error = 'The claim token is not valid. Copy it exactly from the installer output.';
-                                } else {
-                                        error = err.message;
-                                }
-                        } else {
-                                error = String(err);
-                        }
+                        handleClaimError(err);
                 } finally {
                         busy = false;
                 }
         }
 
+        function handleClaimError(err: unknown) {
+                if (!(err instanceof ApiError)) {
+                        stepError = String(err);
+                        return;
+                }
+                if (err.code === 'token_expired' || err.code === 'token_used' || err.code === 'invalid_token') {
+                        // Keep the tried value and all other form state so only the
+                        // token needs correcting; point at the documented fallback.
+                        tokenRejectMsg = tokenRejectMessage(err.code);
+                        tokenMode = 'manual';
+                        tokenTouched = true;
+                        announce(tokenRejectMsg);
+                        void tick().then(() => tokenEl?.focus({ preventScroll: true }));
+                        return;
+                }
+                if (err.code === 'wrong_state') {
+                        stepError = err.message;
+                        showLoginLink = true;
+                        return;
+                }
+                stepError = err.message;
+        }
+
+        function tokenRejectMessage(code: string): string {
+                const again =
+                        'Enter a fresh one below, or run "sudo drevanta claim regenerate" on the server and open the new link.';
+                if (code === 'token_expired') return 'This setup token has expired. ' + again;
+                if (code === 'token_used') return 'This setup token was already used. ' + again;
+                return 'This setup token is not valid. Check it against the installer output, or run "sudo drevanta claim regenerate" on the server.';
+        }
+
+        // --- MFA enrolment -----------------------------------------------------
+
         async function beginMfaSetup() {
-                error = '';
+                stepError = '';
                 busy = true;
                 try {
                         const res = await postJSON<MfaSetup>('/api/v1/onboarding/mfa/setup', {});
                         totpSecret = res.secret;
-                        otpauthUri = res.otpauth_uri;
                         qrSvg = await QRCode.toString(res.otpauth_uri, {
                                 type: 'svg',
                                 margin: 1,
@@ -148,7 +343,7 @@
                         totpCode = '';
                         step = 'mfa-setup';
                 } catch (err) {
-                        error = err instanceof ApiError ? err.message : String(err);
+                        stepError = err instanceof ApiError ? err.message : String(err);
                         step = 'mfa-choice';
                 } finally {
                         busy = false;
@@ -157,7 +352,7 @@
 
         async function submitTotp(e: SubmitEvent) {
                 e.preventDefault();
-                error = '';
+                stepError = '';
                 busy = true;
                 try {
                         const res = await postJSON<MfaVerified>('/api/v1/onboarding/mfa/verify', { code: totpCode.trim() });
@@ -165,9 +360,9 @@
                         step = 'recovery';
                 } catch (err) {
                         if (err instanceof ApiError && err.code === 'totp_invalid') {
-                                error = 'That code did not match. Check the clock on this device and try the current code.';
+                                stepError = 'That code did not match. Check the clock on this device and try the current code.';
                         } else {
-                                error = err instanceof ApiError ? err.message : String(err);
+                                stepError = err instanceof ApiError ? err.message : String(err);
                         }
                 } finally {
                         busy = false;
@@ -175,7 +370,7 @@
         }
 
         async function submitSkip() {
-                error = '';
+                stepError = '';
                 if (!riskAcknowledged) return;
                 busy = true;
                 try {
@@ -183,7 +378,7 @@
                         step = 'done';
                         setTimeout(() => goto('/', { replaceState: true }), 1200);
                 } catch (err) {
-                        error = err instanceof ApiError ? err.message : String(err);
+                        stepError = err instanceof ApiError ? err.message : String(err);
                 } finally {
                         busy = false;
                 }
@@ -202,177 +397,1429 @@
                         // Clipboard can be unavailable over plain http; the codes remain selectable.
                 }
         }
+
+        // --- password helpers ---------------------------------------------------
+
+        function generatePassword() {
+                const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*-_=+';
+                const length = 20;
+                const bytes = new Uint32Array(length);
+                crypto.getRandomValues(bytes);
+                let out = '';
+                for (let i = 0; i < length; i++) out += alphabet[bytes[i] % alphabet.length];
+                password = out;
+                password2 = out;
+                showPw = true;
+                showPw2 = true;
+                pwTouched = true;
+                confirmTouched = true;
+                void tick().then(() => password2El?.focus({ preventScroll: true }));
+        }
+
+        function capsHandler(e: KeyboardEvent) {
+                if (typeof e.getModifierState !== 'function') return;
+                capsOn = e.getModifierState('CapsLock');
+        }
 </script>
 
 <svelte:head>
         <title>Onboarding — Drevanta</title>
 </svelte:head>
 
-<div class="auth-wrap wide">
-        <div class="steps" aria-hidden="true">
-                <span class="step-chip" class:current={step === 'claim'} class:done={['mfa-choice', 'mfa-setup', 'recovery', 'done'].includes(step)}>
-                        1 · claim
-                </span>
-                <span class="step-chip" class:current={['mfa-choice', 'mfa-setup'].includes(step)} class:done={['recovery', 'done'].includes(step)}>
-                        2 · mfa
-                </span>
-                <span class="step-chip" class:current={step === 'recovery'} class:done={step === 'done'}>
-                        3 · recovery
-                </span>
-        </div>
+<div class="ob">
+        <p class="sr-only" role="status" aria-live="polite">{liveMsg}</p>
 
-        <div class="auth-card">
-                {#if error}
-                        <div class="error" role="alert">{error}</div>
+        <main class="obcard">
+                <header class="ohead">
+                        <div class="obrand">
+                                <span class="obrand__mark" aria-hidden="true">
+                                        <svg
+                                                width="19"
+                                                height="19"
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                stroke-width="1.7"
+                                                stroke-linecap="round"
+                                                stroke-linejoin="round"
+                                        >
+                                                <path d="M12 3l7.5 3.2v5.6c0 4.5-3.1 8.4-7.5 10.2-4.4-1.8-7.5-5.7-7.5-10.2V6.2L12 3z" />
+                                                <path d="M9.2 12.2l2 2 3.6-3.9" />
+                                        </svg>
+                                </span>
+                                <div>
+                                        <h1>Drevanta</h1>
+                                        <p>Private server console</p>
+                                </div>
+                        </div>
+
+                        <span class="opill" title="Only reachable from the server itself. Connect through an SSH tunnel.">
+                                <svg
+                                        width="12"
+                                        height="12"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        aria-hidden="true"
+                                >
+                                        <rect x="4" y="11" width="16" height="10" rx="2.5" />
+                                        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+                                </svg>
+                                loopback-only<span class="sep">·</span>SSH tunnel
+                        </span>
+                </header>
+
+                <div class="odivider"></div>
+
+                {#if stepError}
+                        <div class="oerror" role="alert">
+                                <span>{stepError}</span>
+                                {#if showLoginLink}
+                                        <a href="/login">Sign in</a>
+                                {/if}
+                        </div>
                 {/if}
 
                 {#if step === 'loading'}
-                        <div class="loading">loading onboarding state…</div>
+                        <p class="oloading">loading onboarding state…</p>
                 {:else if step === 'claim'}
-                        <h1 class="auth-title">Claim this instance</h1>
-                        <p class="auth-sub">
-                                Paste the single-use claim token printed by the installer, then create the
-                                administrator account. The token expires and works exactly once.
-                        </p>
-                        <form onsubmit={submitClaim}>
-                                <div class="field">
-                                        <label for="token">Claim token</label>
-                                        <input id="token" name="token" placeholder="drv1_…" autocomplete="off" spellcheck="false" required bind:value={token} />
-                                        {#if !token.trim()}
-                                                <span class="hint">Shown once by <code>install.sh</code> after a fresh install.</span>
-                                        {:else if tokenFromLink}
-                                                <span class="hint">Token filled from your one-time setup link.</span>
-                                        {/if}
+                        <section class="ointro">
+                                <h2>Claim this instance</h2>
+                                <p>{introCopy}</p>
+                        </section>
+
+                        <form class="oform" novalidate onsubmit={submitClaim}>
+                                {#if tokenMode === 'chip'}
+                                        <!-- approved green status: loaded ≠ verified; the backend
+                                                     checks the single-use token only on claim -->
+                                        <div class="ochip">
+                                                <span class="ochip__badge" aria-hidden="true">
+                                                        <svg
+                                                                width="13"
+                                                                height="13"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                stroke-width="3.4"
+                                                                stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                        >
+                                                                <path d="M20 6 9 17l-5-5" />
+                                                        </svg>
+                                                </span>
+                                                <span class="ochip__body">
+                                                        <span class="ochip__title">Setup token loaded</span>
+                                                        <span class="ochip__meta">
+                                                                <code>{chipMasked}</code>
+                                                                <span class="sep">·</span>
+                                                                {chipSupport}
+                                                        </span>
+                                                </span>
+                                                <button
+                                                        class="ochip__action"
+                                                        type="button"
+                                                        onclick={changeToken}
+                                                        aria-label="Enter a different claim token"
+                                                >
+                                                        Change
+                                                </button>
+                                        </div>
+                                {:else}
+                                        <div
+                                                class="ofield"
+                                                class:has-error={showTokenErr || showTokenReject}
+                                                class:is-valid={tokenValidManual}
+                                        >
+                                                <div class="olabel-row">
+                                                        <label class="olabel" for="token">Claim token</label>
+                                                        <span class="olabel-note">single-use</span>
+                                                </div>
+                                                <div class="ocontrol">
+                                                        <input
+                                                                class="oinput oinput--mono"
+                                                                id="token"
+                                                                name="token"
+                                                                type="text"
+                                                                placeholder="drv1_••••••••••••••••••••••••••"
+                                                                autocomplete="off"
+                                                                autocapitalize="off"
+                                                                autocorrect="off"
+                                                                spellcheck="false"
+                                                                aria-describedby="token-hint token-err"
+                                                                aria-invalid={showTokenErr || showTokenReject}
+                                                                value={token}
+                                                                bind:this={tokenEl}
+                                                                oninput={onTokenInput}
+                                                                onpaste={onTokenPaste}
+                                                                onblur={() => (tokenTouched = true)}
+                                                        />
+                                                        <span class="ostatus" aria-hidden="true">
+                                                                <svg
+                                                                        width="16"
+                                                                        height="16"
+                                                                        viewBox="0 0 24 24"
+                                                                        fill="none"
+                                                                        stroke="currentColor"
+                                                                        stroke-width="3"
+                                                                        stroke-linecap="round"
+                                                                        stroke-linejoin="round"
+                                                                >
+                                                                        <path d="M20 6 9 17l-5-5" />
+                                                                </svg>
+                                                        </span>
+                                                </div>
+                                                <p class="ohint" id="token-hint">{tokenHint}</p>
+                                                <p class="oerr" id="token-err" hidden={!showTokenErr && !showTokenReject}>
+                                                        {showTokenReject ? tokenRejectMsg : tokenErr}
+                                                </p>
+                                        </div>
+                                {/if}
+
+                                <div class="ofield" class:has-error={userTouched && userErr !== ''}>
+                                        <label class="olabel" for="username">Administrator username</label>
+                                        <input
+                                                class="oinput"
+                                                id="username"
+                                                name="username"
+                                                type="text"
+                                                placeholder="e.g. root.admin"
+                                                autocomplete="username"
+                                                autocapitalize="off"
+                                                spellcheck="false"
+                                                aria-describedby="user-hint user-err"
+                                                aria-invalid={userTouched && userErr !== ''}
+                                                bind:value={username}
+                                                bind:this={usernameEl}
+                                                onblur={() => (userTouched = true)}
+                                        />
+                                        <p class="ohint" id="user-hint">
+                                                3–32 characters · letters, numbers, dots, dashes, underscores.
+                                        </p>
+                                        <p class="oerr" id="user-err" hidden={!(userTouched && userErr !== '')}>{userErr}</p>
                                 </div>
-                                <div class="field">
-                                        <label for="username">Administrator username</label>
-                                        <input id="username" name="username" autocomplete="username" minlength={3} maxlength={32}
-                                                pattern="[a-zA-Z0-9][a-zA-Z0-9._-]*" required bind:value={username} />
+
+                                <div class="ofield" class:has-error={pwTouched && pwErr !== ''}>
+                                        <div class="olabel-row">
+                                                <label class="olabel" for="password">Password</label>
+                                                <button class="olinkbtn" type="button" onclick={generatePassword}>Generate</button>
+                                        </div>
+                                        <div class="ocontrol">
+                                                <input
+                                                        class="oinput"
+                                                        id="password"
+                                                        name="password"
+                                                        type={showPw ? 'text' : 'password'}
+                                                        placeholder="At least 12 characters"
+                                                        autocomplete="new-password"
+                                                        maxlength={PASSWORD_MAX}
+                                                        aria-describedby="pw-hint pw-err"
+                                                        aria-invalid={pwTouched && pwErr !== ''}
+                                                        bind:value={password}
+                                                        bind:this={passwordEl}
+                                                        onkeydown={capsHandler}
+                                                        onkeyup={capsHandler}
+                                                        onblur={() => {
+                                                                pwTouched = true;
+                                                                capsOn = false;
+                                                        }}
+                                                />
+                                                <button
+                                                        class="ocontrol__btn oeye"
+                                                        class:is-on={showPw}
+                                                        type="button"
+                                                        aria-label={showPw ? 'Hide password' : 'Show password'}
+                                                        aria-pressed={showPw}
+                                                        onclick={() => (showPw = !showPw)}
+                                                >
+                                                        <svg
+                                                                class="icon-show"
+                                                                width="17"
+                                                                height="17"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                stroke-width="1.8"
+                                                                stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                        >
+                                                                <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
+                                                                <circle cx="12" cy="12" r="3" />
+                                                        </svg>
+                                                        <svg
+                                                                class="icon-hide"
+                                                                width="17"
+                                                                height="17"
+                                                                viewBox="0 0 24 24"
+                                                                fill="none"
+                                                                stroke="currentColor"
+                                                                stroke-width="1.8"
+                                                                stroke-linecap="round"
+                                                                stroke-linejoin="round"
+                                                        >
+                                                                <path d="M3 3l18 18" />
+                                                                <path d="M10.6 10.6a3 3 0 0 0 4.2 4.2" />
+                                                                <path d="M9.9 5.2A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.5 4.3" />
+                                                                <path d="M6.6 6.6A17.2 17.2 0 0 0 2 12s3.6 7 10 7a10.9 10.9 0 0 0 3.4-.5" />
+                                                        </svg>
+                                                </button>
+                                        </div>
+
+                                        <div class="ometer" aria-hidden="true">
+                                                <span class="ometer__bar" class:on={pwLevel >= 1} style:background={pwLevel >= 1 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 2} style:background={pwLevel >= 2 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 3} style:background={pwLevel >= 3 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 4} style:background={pwLevel >= 4 ? strengthColor : ''}></span>
+                                        </div>
+
+                                        <div class="opw-foot">
+                                                <ul class="oreqs">
+                                                        <li class="oreq" class:ok={reqLenOk}>
+                                                                <span class="oreq__dot" aria-hidden="true">
+                                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                                </span>
+                                                                At least 12 characters
+                                                        </li>
+                                                        <li class="oreq" class:ok={reqDistinctOk}>
+                                                                <span class="oreq__dot" aria-hidden="true">
+                                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                                </span>
+                                                                Different from your username
+                                                        </li>
+                                                </ul>
+                                                <span class="ostrength" aria-live="polite" style:color={pwLevel > 0 ? strengthColor : ''}>{strengthLabel}</span>
+                                        </div>
+
+                                        <p class="ohint ohint--warn" hidden={!capsOn}>Caps Lock is on.</p>
+                                        <p class="ohint" id="pw-hint">Stored only as an argon2id hash.</p>
+                                        <p class="oerr" id="pw-err" hidden={!(pwTouched && pwErr !== '')}>{pwErr}</p>
                                 </div>
-                                <div class="field">
-                                        <label for="password">Password</label>
-                                        <input id="password" name="new-password" type="password" autocomplete="new-password"
-                                                minlength={12} required bind:value={password} />
-                                        <span class="hint">At least 12 characters. Stored only as an argon2id hash.</span>
+
+                                <div class="ofield" class:has-error={confirmTouched && confirmErr !== ''}>
+                                        <label class="olabel" for="password2">Repeat password</label>
+                                        <div class="ocontrol">
+                                                <input
+                                                        class="oinput"
+                                                        id="password2"
+                                                        name="password2"
+                                                        type={showPw2 ? 'text' : 'password'}
+                                                        placeholder="Type it again"
+                                                        autocomplete="new-password"
+                                                        maxlength={PASSWORD_MAX}
+                                                        aria-describedby="confirm-err"
+                                                        aria-invalid={confirmTouched && confirmErr !== ''}
+                                                        bind:value={password2}
+                                                        bind:this={password2El}
+                                                        onkeydown={capsHandler}
+                                                        onkeyup={capsHandler}
+                                                        onblur={() => {
+                                                                confirmTouched = true;
+                                                                capsOn = false;
+                                                        }}
+                                                />
+                                                <button
+                                                        class="ocontrol__btn oeye"
+                                                        class:is-on={showPw2}
+                                                        type="button"
+                                                        aria-label={showPw2 ? 'Hide password' : 'Show password'}
+                                                        aria-pressed={showPw2}
+                                                        onclick={() => (showPw2 = !showPw2)}
+                                                >
+                                                        <svg class="icon-show" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                                <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
+                                                                <circle cx="12" cy="12" r="3" />
+                                                        </svg>
+                                                        <svg class="icon-hide" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                                <path d="M3 3l18 18" />
+                                                                <path d="M10.6 10.6a3 3 0 0 0 4.2 4.2" />
+                                                                <path d="M9.9 5.2A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.5 4.3" />
+                                                                <path d="M6.6 6.6A17.2 17.2 0 0 0 2 12s3.6 7 10 7a10.9 10.9 0 0 0 3.4-.5" />
+                                                        </svg>
+                                                </button>
+                                        </div>
+                                        <p class="oerr" id="confirm-err" hidden={!(confirmTouched && confirmErr !== '')}>{confirmErr}</p>
                                 </div>
-                                <div class="field">
-                                        <label for="password2">Repeat password</label>
-                                        <input id="password2" name="new-password-confirm" type="password" autocomplete="new-password"
-                                                minlength={12} required bind:value={password2} />
-                                </div>
-                                <button class="btn-primary" type="submit" disabled={busy}>
-                                        {busy ? 'Claiming…' : 'Create administrator account'}
+
+                                <button class="obtn" type="submit" disabled={busy} class:is-loading={busy} aria-busy={busy}>
+                                        <span class="obtn__spinner" aria-hidden="true"></span>
+                                        <span>{busy ? 'Creating administrator…' : 'Create administrator account'}</span>
                                 </button>
                         </form>
+
+                        <div class="ometa">
+                                <span>argon2id</span><span class="dot">·</span>
+                                <span>token single-use</span><span class="dot">·</span>
+                                <span>loopback only</span>
+                        </div>
+
+                        <details class="odisclosure">
+                                <summary>
+                                        Where do I find the claim token?
+                                        <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                                <path d="M6 9l6 6 6-6" />
+                                        </svg>
+                                </summary>
+                                <p>
+                                        On the server, the installer prints a one-time link like
+                                        <code>http://127.0.0.1:18080/onboarding#token=drv1_…</code>. Forward the port first —
+                                        <code>ssh -N -L 18080:127.0.0.1:8080 user@server</code> — then open that link. The token is
+                                        consumed on success and cannot be reused. If the link is lost or expired, run
+                                        <code>sudo drevanta claim regenerate</code> on the server for a fresh one.
+                                </p>
+                        </details>
                 {:else if step === 'mfa-choice'}
-                        <h1 class="auth-title">Protect the account</h1>
-                        <p class="auth-sub">
-                                Add a second factor (recommended) or skip it for now. You can decide only
-                                during this wizard.
-                        </p>
+                        <section class="ointro">
+                                <h2>Protect the account</h2>
+                                <p>Add a second factor (recommended) or skip it for now. You can decide only during this wizard.</p>
+                        </section>
 
-                        <button class="btn-primary" type="button" onclick={beginMfaSetup} disabled={busy}>
-                                Set up authenticator app
-                        </button>
+                        <div class="oactions">
+                                <button class="obtn" type="button" onclick={beginMfaSetup} disabled={busy} class:is-loading={busy} aria-busy={busy}>
+                                        <span class="obtn__spinner" aria-hidden="true"></span>
+                                        <span>{busy ? 'Preparing…' : 'Set up authenticator app'}</span>
+                                </button>
 
-                        <div class="divider"><span>or</span></div>
+                                <div class="odivider"><span>or</span></div>
 
-                        <div class="warn-box">
-                                <strong>Skipping MFA lowers security.</strong> Without a second factor, knowing the
-                                password alone is enough to sign in. You can only reach the console through an SSH
-                                tunnel, which limits exposure, but the account will not be 2FA-protected.
-                        </div>
-                        <label class="check-row">
-                                <input type="checkbox" bind:checked={riskAcknowledged} />
-                                <span>I understand the risk of running without multi-factor authentication.</span>
-                        </label>
-                        <button class="btn-danger" type="button" onclick={submitSkip} disabled={!riskAcknowledged || busy}>
-                                Skip MFA and finish
-                        </button>
-                {:else if step === 'mfa-setup'}
-                        <h1 class="auth-title">Scan and confirm</h1>
-                        <p class="auth-sub">
-                                Add the entry to your authenticator app by scanning the QR code, or enter the
-                                secret manually. Then type the current 6-digit code.
-                        </p>
-                        <div class="qr-box">{@html qrSvg}</div>
-                        <div class="field">
-                                <label for="secret">Secret (manual entry)</label>
-                                <input id="secret" readonly value={totpSecret} spellcheck="false" onclick={(e) => (e.currentTarget as HTMLInputElement).select()} />
-                        </div>
-                        <form onsubmit={submitTotp}>
-                                <div class="field">
-                                        <label for="totp-code">6-digit code</label>
-                                        <input id="totp-code" inputmode="numeric" pattern="[0-9]*" maxlength={6}
-                                                placeholder="123456" autocomplete="one-time-code" required bind:value={totpCode} />
+                                <div class="owarn-box">
+                                        <strong>Skipping MFA lowers security.</strong> Without a second factor, knowing the
+                                        password alone is enough to sign in. You can only reach the console through an SSH
+                                        tunnel, which limits exposure, but the account will not be 2FA-protected.
                                 </div>
-                                <button class="btn-primary" type="submit" disabled={busy || totpCode.trim().length !== 6}>
-                                        {busy ? 'Verifying…' : 'Verify and enable MFA'}
+                                <label class="ocheck-row">
+                                        <input type="checkbox" bind:checked={riskAcknowledged} />
+                                        <span>I understand the risk of running without multi-factor authentication.</span>
+                                </label>
+                                <button class="obtn obtn--danger" type="button" onclick={submitSkip} disabled={!riskAcknowledged || busy}>
+                                        Skip MFA and finish
+                                </button>
+                        </div>
+                {:else if step === 'mfa-setup'}
+                        <section class="ointro">
+                                <h2>Scan and confirm</h2>
+                                <p>
+                                        Add the entry to your authenticator app by scanning the QR code, or enter the secret
+                                        manually. Then type the current 6-digit code.
+                                </p>
+                        </section>
+                        <div class="oqr">{@html qrSvg}</div>
+                        <div class="ofield">
+                                <label class="olabel" for="secret">Secret (manual entry)</label>
+                                <input
+                                        class="oinput oinput--mono"
+                                        id="secret"
+                                        readonly
+                                        value={totpSecret}
+                                        spellcheck="false"
+                                        onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
+                                />
+                        </div>
+                        <form class="oform" novalidate onsubmit={submitTotp}>
+                                <div class="ofield">
+                                        <label class="olabel" for="totp-code">6-digit code</label>
+                                        <input
+                                                class="oinput oinput--mono"
+                                                id="totp-code"
+                                                inputmode="numeric"
+                                                maxlength={6}
+                                                placeholder="123456"
+                                                autocomplete="one-time-code"
+                                                bind:value={totpCode}
+                                        />
+                                </div>
+                                <button class="obtn" type="submit" disabled={busy || totpCode.trim().length !== 6} class:is-loading={busy} aria-busy={busy}>
+                                        <span class="obtn__spinner" aria-hidden="true"></span>
+                                        <span>{busy ? 'Verifying…' : 'Verify and enable MFA'}</span>
                                 </button>
                         </form>
                 {:else if step === 'recovery'}
-                        <h1 class="auth-title">Save your recovery codes</h1>
-                        <p class="auth-sub">
-                                Each code works exactly once at sign-in if your authenticator is unavailable.
-                                They are shown <strong>only this once</strong>; the server stores just their hashes.
-                        </p>
-                        <div class="codes-grid">
+                        <section class="ointro">
+                                <h2>Save your recovery codes</h2>
+                                <p>
+                                        Each code works exactly once at sign-in if your authenticator is unavailable. They are
+                                        shown <strong>only this once</strong>; the server stores just their hashes.
+                                </p>
+                        </section>
+                        <div class="ocodes-grid">
                                 {#each recoveryCodes as c (c)}
-                                        <span class="code-chip">{c}</span>
+                                        <span class="ocode-chip">{c}</span>
                                 {/each}
                         </div>
-                        <button class="btn-ghost" type="button" onclick={copyCodes}>Copy all codes</button>
-                        <label class="check-row">
+                        <button class="obtn obtn--secondary" type="button" onclick={copyCodes}>Copy all codes</button>
+                        <label class="ocheck-row">
                                 <input type="checkbox" bind:checked={codesSaved} />
                                 <span>I have stored these codes somewhere safe (password manager or printed copy).</span>
                         </label>
-                        <button class="btn-primary" type="button" onclick={finishRecovery} disabled={!codesSaved}>
+                        <button class="obtn" type="button" onclick={finishRecovery} disabled={!codesSaved}>
                                 Finish onboarding
                         </button>
                 {:else if step === 'done'}
-                        <h1 class="auth-title">You're all set 🎉</h1>
-                        <p class="auth-sub">The dashboard will open in a moment…</p>
+                        <section class="odone">
+                                <div class="odone__icon" aria-hidden="true">
+                                        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                </div>
+                                <h2>You're all set</h2>
+                                <p>Onboarding is complete. Opening the dashboard…</p>
+                        </section>
                 {/if}
-        </div>
+        </main>
 </div>
 
 <style>
-        .wide {
-                max-width: 560px;
+        /* Design tokens from the approved prototype, scoped to this page so
+           the dashboard's global palette is untouched. */
+        .ob {
+                --line: #1c2530;
+                --line-hi: #28323f;
+                --line-soft: #161e27;
+                --text: #e7eef5;
+                --muted: #93a1b0;
+                --dim: #61707f;
+                --accent: #3ddc97;
+                --accent-glow: rgba(61, 220, 151, 0.14);
+                --danger: #ff6b6b;
+                --warn: #ffb454;
+                --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+                min-height: 100vh;
+                display: grid;
+                place-items: center;
+                padding: 36px 20px;
+                background: #06080b;
+                color: var(--text);
+                font-size: 15px;
+                line-height: 1.5;
         }
 
-        form {
+        /* Ambient green glow + subtle grid, as fixed overlays like the
+           prototype's body::before/::after. Pointer events pass through. */
+        .ob::before {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background:
+                        radial-gradient(900px 520px at 50% -12%, rgba(61, 220, 151, 0.11), transparent 62%),
+                        radial-gradient(700px 420px at 92% 108%, rgba(84, 132, 255, 0.07), transparent 60%);
+        }
+
+        .ob::after {
+                content: '';
+                position: fixed;
+                inset: 0;
+                pointer-events: none;
+                background-image:
+                        linear-gradient(to right, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+                background-size: 56px 56px;
+                -webkit-mask-image: radial-gradient(circle at 50% 32%, #000 0%, transparent 72%);
+                mask-image: radial-gradient(circle at 50% 32%, #000 0%, transparent 72%);
+        }
+
+        .sr-only {
+                position: absolute;
+                width: 1px;
+                height: 1px;
+                padding: 0;
+                margin: -1px;
+                overflow: hidden;
+                clip: rect(0 0 0 0);
+                white-space: nowrap;
+                border: 0;
+        }
+
+        /* ---------- card ---------- */
+        .obcard {
+                position: relative;
+                width: 100%;
+                max-width: 600px;
+                padding: 28px 30px 24px;
+                border-radius: 18px;
+                border: 1px solid var(--line);
+                background:
+                        radial-gradient(120% 100% at 50% 0%, rgba(61, 220, 151, 0.055), transparent 56%),
+                        linear-gradient(180deg, #0d1319 0%, #0a0e13 100%);
+                box-shadow:
+                        0 1px 0 rgba(255, 255, 255, 0.045) inset,
+                        0 40px 90px -32px rgba(0, 0, 0, 0.95),
+                        0 0 0 1px rgba(0, 0, 0, 0.4);
+                animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .obcard::before {
+                content: '';
+                position: absolute;
+                left: 14px;
+                right: 14px;
+                top: 0;
+                height: 1px;
+                background: linear-gradient(90deg, transparent, rgba(61, 220, 151, 0.55), transparent);
+        }
+
+        @keyframes rise {
+                from {
+                        opacity: 0;
+                        transform: translateY(12px);
+                }
+                to {
+                        opacity: 1;
+                        transform: none;
+                }
+        }
+
+        /* ---------- header ---------- */
+        .ohead {
                 display: flex;
-                flex-direction: column;
+                align-items: center;
+                justify-content: space-between;
                 gap: 14px;
+                flex-wrap: wrap;
         }
 
-        .auth-card {
-                gap: 16px;
+        .obrand {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                min-width: 0;
         }
 
-        .divider {
+        .obrand__mark {
+                width: 38px;
+                height: 38px;
+                flex: 0 0 auto;
+                border-radius: 11px;
+                display: grid;
+                place-items: center;
+                color: var(--accent);
+                background: linear-gradient(160deg, rgba(61, 220, 151, 0.24), rgba(61, 220, 151, 0.05));
+                border: 1px solid rgba(61, 220, 151, 0.28);
+                box-shadow: 0 0 26px -8px rgba(61, 220, 151, 0.8);
+        }
+
+        .obrand h1 {
+                margin: 0;
+                font-size: 14px;
+                font-weight: 700;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+                color: #eef5fb;
+        }
+
+        .obrand p {
+                margin: 1px 0 0;
+                font-size: 12px;
+                color: var(--dim);
+                letter-spacing: 0.02em;
+        }
+
+        .opill {
+                display: inline-flex;
+                align-items: center;
+                gap: 7px;
+                padding: 6px 11px;
+                border-radius: 999px;
+                font-family: var(--mono);
+                font-size: 11px;
+                letter-spacing: 0.02em;
+                color: #9aabb9;
+                background: rgba(255, 255, 255, 0.028);
+                border: 1px solid var(--line);
+                white-space: nowrap;
+        }
+
+        .opill svg {
+                color: var(--accent);
+                opacity: 0.85;
+                flex: 0 0 auto;
+        }
+
+        .opill .sep {
+                opacity: 0.4;
+                margin: 0 1px;
+        }
+
+        .odivider {
+                height: 1px;
+                margin: 22px 0 20px;
+                background: linear-gradient(90deg, transparent, var(--line) 10%, var(--line) 90%, transparent);
+        }
+
+        .oactions .odivider {
                 display: flex;
                 align-items: center;
                 gap: 10px;
-                color: var(--text-dim);
+                height: auto;
+                background: none;
+                margin: 4px 0;
+                color: var(--dim);
                 font-size: 12px;
                 text-transform: uppercase;
                 letter-spacing: 0.08em;
         }
 
-        .divider::before,
-        .divider::after {
+        .oactions .odivider::before,
+        .oactions .odivider::after {
                 content: '';
                 flex: 1;
                 height: 1px;
-                background: var(--border);
+                background: var(--line);
         }
 
-        code {
-                background: var(--bg-inset);
+        /* ---------- intro / loading / error ---------- */
+        .ointro h2 {
+                margin: 0;
+                font-size: 19px;
+                font-weight: 600;
+                letter-spacing: -0.01em;
+        }
+
+        .ointro p {
+                margin: 7px 0 0;
+                font-size: 13.5px;
+                line-height: 1.62;
+                color: var(--muted);
+                max-width: 52ch;
+        }
+
+        .oloading {
+                color: var(--dim);
+                padding: 40px 0;
+                text-align: center;
+                margin: 0;
+        }
+
+        .oerror {
+                background: rgba(255, 107, 107, 0.08);
+                border: 1px solid rgba(255, 107, 107, 0.4);
+                color: var(--danger);
+                border-radius: 10px;
+                padding: 10px 14px;
+                font-size: 13px;
+                line-height: 1.55;
+                margin-bottom: 16px;
+                display: flex;
+                align-items: baseline;
+                gap: 8px;
+                flex-wrap: wrap;
+        }
+
+        .oerror a {
+                color: var(--danger);
+                font-weight: 600;
+        }
+
+        .oerror a:focus-visible {
+                outline: 2px solid rgba(255, 107, 107, 0.6);
+                outline-offset: 2px;
                 border-radius: 4px;
-                padding: 1px 5px;
+        }
+
+        /* ---------- form ---------- */
+        .oform {
+                display: flex;
+                flex-direction: column;
+                gap: 17px;
+                margin-top: 22px;
+        }
+
+        .ofield {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+        }
+
+        .olabel-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+        }
+
+        .olabel {
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.11em;
+                text-transform: uppercase;
+                color: #8494a3;
+        }
+
+        .olabel-note {
+                font-family: var(--mono);
+                font-size: 10.5px;
+                letter-spacing: 0.02em;
+                color: var(--accent);
+                opacity: 0.85;
+                padding: 2px 7px;
+                border-radius: 5px;
+                background: rgba(61, 220, 151, 0.1);
+                border: 1px solid rgba(61, 220, 151, 0.22);
+        }
+
+        .olinkbtn {
+                border: 0;
+                background: none;
+                padding: 2px 0;
+                cursor: pointer;
+                font-family: var(--mono);
+                font-size: 11px;
+                letter-spacing: 0.03em;
+                color: var(--dim);
+                transition: color 0.15s;
+        }
+
+        .olinkbtn:hover {
+                color: var(--accent);
+        }
+
+        .olinkbtn:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.6);
+                outline-offset: 3px;
+                border-radius: 4px;
+        }
+
+        .ocontrol {
+                position: relative;
+        }
+
+        .ocontrol > .oinput {
+                padding-right: 46px;
+        }
+
+        .oinput {
+                width: 100%;
+                min-height: 46px;
+                padding: 12px 13px;
+                border-radius: 10px;
+                border: 1px solid var(--line);
+                background: #080c11;
+                color: var(--text);
+                font: inherit;
+                font-size: 14.5px;
+                line-height: 1.3;
+                transition:
+                        border-color 0.16s ease,
+                        box-shadow 0.16s ease,
+                        background 0.16s ease;
+        }
+
+        .oinput::placeholder {
+                color: #3f4b58;
+        }
+
+        .oinput:hover {
+                border-color: var(--line-hi);
+        }
+
+        .oinput:focus {
+                outline: none;
+                border-color: rgba(61, 220, 151, 0.5);
+                box-shadow: 0 0 0 3px var(--accent-glow);
+                background: #090e13;
+        }
+
+        .oinput--mono {
+                font-family: var(--mono);
+                font-size: 13px;
+                letter-spacing: 0.02em;
+        }
+
+        .ocontrol__btn {
+                position: absolute;
+                right: 6px;
+                top: 50%;
+                transform: translateY(-50%);
+                width: 34px;
+                height: 34px;
+                display: grid;
+                place-items: center;
+                border: 0;
+                border-radius: 8px;
+                background: transparent;
+                color: var(--dim);
+                cursor: pointer;
+                transition:
+                        color 0.15s,
+                        background 0.15s;
+        }
+
+        .ocontrol__btn:hover {
+                color: var(--text);
+                background: rgba(255, 255, 255, 0.06);
+        }
+
+        .ocontrol__btn:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.6);
+                outline-offset: 1px;
+        }
+
+        .oeye .icon-hide {
+                display: none;
+        }
+
+        .oeye.is-on .icon-show {
+                display: none;
+        }
+
+        .oeye.is-on .icon-hide {
+                display: block;
+        }
+
+        .ostatus {
+                position: absolute;
+                right: 14px;
+                top: 50%;
+                transform: translateY(-50%);
+                color: var(--accent);
+                opacity: 0;
+                pointer-events: none;
+                transition:
+                        opacity 0.2s ease,
+                        transform 0.2s ease;
+        }
+
+        .ostatus svg {
+                display: block;
+        }
+
+        .ofield.is-valid .ostatus {
+                opacity: 1;
+        }
+
+        .ohint {
+                margin: 0;
+                font-size: 12.25px;
+                color: var(--dim);
+                line-height: 1.5;
+        }
+
+        .ohint--warn {
+                color: var(--warn);
+        }
+
+        .oerr {
+                margin: 0;
+                font-size: 12.25px;
+                color: var(--danger);
+                display: flex;
+                align-items: center;
+                gap: 6px;
+        }
+
+        .ofield.has-error .oinput {
+                border-color: rgba(255, 107, 107, 0.55);
+                box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1);
+        }
+
+        /* ---------- token chip (locked wording) ---------- */
+        .ochip {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 12px 14px;
+                border-radius: 12px;
+                border: 1px solid rgba(61, 220, 151, 0.3);
+                background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.035));
+                box-shadow:
+                        0 0 0 1px rgba(0, 0, 0, 0.3) inset,
+                        0 12px 34px -22px rgba(61, 220, 151, 0.95);
+                animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .ochip__badge {
+                width: 26px;
+                height: 26px;
+                flex: 0 0 auto;
+                border-radius: 50%;
+                display: grid;
+                place-items: center;
+                color: var(--accent);
+                background: rgba(61, 220, 151, 0.16);
+                border: 1px solid rgba(61, 220, 151, 0.42);
+                animation: pop 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+        }
+
+        @keyframes pop {
+                from {
+                        transform: scale(0.72);
+                        opacity: 0.35;
+                }
+                to {
+                        transform: none;
+                        opacity: 1;
+                }
+        }
+
+        .ochip__body {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+                min-width: 0;
+                flex: 1;
+        }
+
+        .ochip__title {
+                font-size: 13px;
+                font-weight: 600;
+                color: #c8f4de;
+                letter-spacing: -0.005em;
+        }
+
+        .ochip__meta {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                flex-wrap: wrap;
+                font-family: var(--mono);
+                font-size: 11px;
+                color: var(--dim);
+                line-height: 1.5;
+        }
+
+        .ochip__meta code {
+                font: inherit;
+                color: #8fb3a5;
+        }
+
+        .ochip__meta .sep {
+                opacity: 0.4;
+        }
+
+        .ochip__action {
+                flex: 0 0 auto;
+                border: 1px solid var(--line);
+                background: rgba(255, 255, 255, 0.03);
+                color: var(--muted);
+                border-radius: 8px;
+                padding: 6px 11px;
+                cursor: pointer;
+                font: inherit;
+                font-family: var(--mono);
+                font-size: 11px;
+                letter-spacing: 0.02em;
+                transition:
+                        color 0.15s,
+                        border-color 0.15s,
+                        background 0.15s;
+        }
+
+        .ochip__action:hover {
+                color: var(--text);
+                border-color: var(--line-hi);
+                background: rgba(255, 255, 255, 0.06);
+        }
+
+        .ochip__action:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.6);
+                outline-offset: 2px;
+        }
+
+        /* ---------- password meter ---------- */
+        .ometer {
+                display: flex;
+                gap: 5px;
+                margin-top: 2px;
+        }
+
+        .ometer__bar {
+                flex: 1;
+                height: 3px;
+                border-radius: 2px;
+                background: #18212b;
+                transition: background 0.25s ease;
+        }
+
+        .opw-foot {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 14px;
+                margin-top: 2px;
+        }
+
+        .oreqs {
+                list-style: none;
+                margin: 0;
+                padding: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+        }
+
+        .oreq {
+                display: flex;
+                align-items: center;
+                gap: 7px;
                 font-size: 12px;
+                color: var(--dim);
+                transition: color 0.18s ease;
+        }
+
+        .oreq__dot {
+                width: 14px;
+                height: 14px;
+                flex: 0 0 auto;
+                border-radius: 50%;
+                display: grid;
+                place-items: center;
+                border: 1px solid #2a3542;
+                color: var(--accent);
+                transition:
+                        background 0.18s,
+                        border-color 0.18s;
+        }
+
+        .oreq__dot svg {
+                opacity: 0;
+                transform: scale(0.55);
+                transition:
+                        opacity 0.18s,
+                        transform 0.18s;
+        }
+
+        .oreq.ok {
+                color: #a9e8c9;
+        }
+
+        .oreq.ok .oreq__dot {
+                background: rgba(61, 220, 151, 0.16);
+                border-color: rgba(61, 220, 151, 0.5);
+        }
+
+        .oreq.ok .oreq__dot svg {
+                opacity: 1;
+                transform: none;
+        }
+
+        .ostrength {
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.09em;
+                text-transform: uppercase;
+                white-space: nowrap;
+                color: var(--dim);
+                transition: color 0.2s;
+        }
+
+        /* ---------- button ---------- */
+        .obtn {
+                position: relative;
+                width: 100%;
+                min-height: 47px;
+                margin-top: 5px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                padding: 0 18px;
+                border: 1px solid transparent;
+                border-radius: 11px;
+                font: inherit;
+                font-size: 14.5px;
+                font-weight: 700;
+                letter-spacing: 0.01em;
+                color: #04120c;
+                cursor: pointer;
+                background: linear-gradient(180deg, #4ae5a4, #2fc98a);
+                box-shadow:
+                        0 1px 0 rgba(255, 255, 255, 0.35) inset,
+                        0 12px 32px -14px rgba(61, 220, 151, 0.9);
+                transition:
+                        filter 0.16s ease,
+                        transform 0.1s ease,
+                        box-shadow 0.16s ease;
+        }
+
+        .obtn:hover {
+                filter: brightness(1.06);
+        }
+
+        .obtn:active {
+                transform: translateY(1px);
+        }
+
+        .obtn:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.9);
+                outline-offset: 3px;
+        }
+
+        .obtn[disabled] {
+                cursor: progress;
+                filter: saturate(0.75) brightness(0.92);
+        }
+
+        .obtn--danger {
+                background: transparent;
+                color: var(--danger);
+                border: 1px solid rgba(255, 107, 107, 0.5);
+                box-shadow: none;
+                font-weight: 600;
+        }
+
+        .obtn--danger:hover {
+                filter: none;
+                background: rgba(255, 107, 107, 0.06);
+        }
+
+        .obtn--secondary {
+                background: rgba(255, 255, 255, 0.03);
+                color: var(--muted);
+                border: 1px solid var(--line);
+                box-shadow: none;
+                font-weight: 600;
+        }
+
+        .obtn--secondary:hover {
+                filter: none;
+                color: var(--text);
+                border-color: var(--line-hi);
+                background: rgba(255, 255, 255, 0.06);
+        }
+
+        .obtn__spinner {
+                display: none;
+                width: 16px;
+                height: 16px;
+                border-radius: 50%;
+                border: 2px solid rgba(4, 18, 12, 0.3);
+                border-top-color: #04120c;
+                animation: spin 0.7s linear infinite;
+        }
+
+        .obtn.is-loading .obtn__spinner {
+                display: block;
+        }
+
+        @keyframes spin {
+                to {
+                        transform: rotate(360deg);
+                }
+        }
+
+        /* ---------- meta / disclosure ---------- */
+        .ometa {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                flex-wrap: wrap;
+                margin-top: 18px;
+                font-family: var(--mono);
+                font-size: 10.5px;
+                letter-spacing: 0.05em;
+                color: #4e5c6a;
+                text-transform: lowercase;
+        }
+
+        .ometa .dot {
+                opacity: 0.45;
+        }
+
+        .odisclosure {
+                margin-top: 16px;
+                padding-top: 14px;
+                border-top: 1px solid var(--line-soft);
+        }
+
+        .odisclosure summary {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                cursor: pointer;
+                list-style: none;
+                font-size: 12.5px;
+                color: var(--dim);
+                transition: color 0.15s;
+        }
+
+        .odisclosure summary::-webkit-details-marker {
+                display: none;
+        }
+
+        .odisclosure summary:hover {
+                color: var(--muted);
+        }
+
+        .odisclosure summary:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.55);
+                outline-offset: 3px;
+                border-radius: 4px;
+        }
+
+        .odisclosure summary .chev {
+                transition: transform 0.2s ease;
+        }
+
+        .odisclosure[open] summary .chev {
+                transform: rotate(180deg);
+        }
+
+        .odisclosure p {
+                margin: 9px 0 0;
+                font-size: 12.5px;
+                line-height: 1.65;
+                color: var(--dim);
+        }
+
+        .odisclosure code {
+                font-family: var(--mono);
+                font-size: 11.5px;
+                padding: 1px 5px;
+                border-radius: 4px;
+                background: rgba(255, 255, 255, 0.05);
+                color: #a9b8c6;
+        }
+
+        /* ---------- wizard steps (same design language) ---------- */
+        .oactions {
+                display: flex;
+                flex-direction: column;
+                gap: 14px;
+                margin-top: 18px;
+        }
+
+        .owarn-box {
+                background: rgba(255, 180, 84, 0.07);
+                border: 1px solid rgba(255, 180, 84, 0.45);
+                color: var(--warn);
+                border-radius: 10px;
+                padding: 12px 14px;
+                font-size: 13px;
+                line-height: 1.55;
+        }
+
+        .ocheck-row {
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                font-size: 13px;
+                color: var(--text);
+                line-height: 1.5;
+        }
+
+        .ocheck-row input {
+                margin-top: 2px;
+                accent-color: var(--accent);
+        }
+
+        .oqr {
+                background: #ffffff;
+                border-radius: 10px;
+                padding: 12px;
+                width: fit-content;
+                align-self: center;
+                margin: 4px 0 2px;
+        }
+
+        .ocodes-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 8px;
+                margin-top: 4px;
+        }
+
+        .ocode-chip {
+                font-family: var(--mono);
+                font-size: 15px;
+                background: #080c11;
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 8px 10px;
+                text-align: center;
+                letter-spacing: 0.08em;
+                color: #cfe0ee;
+        }
+
+        /* ---------- done ---------- */
+        .odone {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                text-align: center;
+                padding: 16px 0 8px;
+                animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .odone__icon {
+                width: 58px;
+                height: 58px;
+                border-radius: 50%;
+                display: grid;
+                place-items: center;
+                color: var(--accent);
+                background: radial-gradient(circle, rgba(61, 220, 151, 0.22), rgba(61, 220, 151, 0.05));
+                border: 1px solid rgba(61, 220, 151, 0.4);
+                box-shadow: 0 0 44px -8px rgba(61, 220, 151, 0.7);
+                margin-bottom: 18px;
+        }
+
+        .odone h2 {
+                margin: 0;
+                font-size: 19px;
+                font-weight: 600;
+        }
+
+        .odone p {
+                margin: 8px 0 0;
+                font-size: 13.5px;
+                line-height: 1.65;
+                color: var(--muted);
+                max-width: 44ch;
+        }
+
+        /* ---------- responsive ---------- */
+        @media (max-width: 520px) {
+                .ob {
+                        padding: 16px 12px;
+                }
+
+                .obcard {
+                        padding: 22px 18px 20px;
+                        border-radius: 14px;
+                }
+
+                .ohead {
+                        gap: 10px;
+                }
+
+                .opill {
+                        font-size: 10.5px;
+                        padding: 5px 9px;
+                }
+
+                .opw-foot {
+                        flex-direction: column;
+                        gap: 8px;
+                }
+
+                .ostrength {
+                        align-self: flex-end;
+                }
+
+                .ochip {
+                        flex-wrap: wrap;
+                }
+
+                .ochip__action {
+                        width: 100%;
+                        text-align: center;
+                        margin-top: 2px;
+                }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+                .ob,
+                .ob::before,
+                .ob::after,
+                .obcard,
+                .obcard::before,
+                .ochip,
+                .ochip__badge,
+                .odone,
+                .odone__icon {
+                        animation-duration: 0.001ms !important;
+                        transition-duration: 0.001ms !important;
+                }
         }
 </style>
