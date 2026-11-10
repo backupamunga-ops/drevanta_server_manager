@@ -755,7 +755,7 @@ test_docs_match_cli() {
                 fi
         done
         # The guide must teach the real, locked tunnel + link format.
-        for frag in "ssh -L 18080:127.0.0.1:8080" "/onboarding#token=" "Token expires" "sudo drevanta claim regenerate"; do
+        for frag in "ssh -L 18080:127.0.0.1:8080" "/onboarding#token=" "expires in 30 minutes" "can be used only once" "sudo drevanta claim regenerate"; do
                 grep -qF "$frag" "$doc" && pass "guide states: $frag" || fail "guide missing: $frag"
         done
         # README must link the guide prominently.
