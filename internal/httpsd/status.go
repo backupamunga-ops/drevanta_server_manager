@@ -24,17 +24,42 @@ const (
 // 0644 on purpose: it lives in the httpsd state directory and helps the
 // unprivileged drevanta user (claim screen) report the access mode.
 type Status struct {
-	Phase       string    `json:"phase"`
-	Host        string    `json:"host"`
-	Profile     string    `json:"profile"`
-	Staging     bool      `json:"staging"`
-	NotBefore   time.Time `json:"not_before,omitempty"`
-	NotAfter    time.Time `json:"not_after,omitempty"`
-	IssuedAt    time.Time `json:"issued_at,omitempty"`
-	Renewals    int       `json:"renewals"`
-	LastError   string    `json:"last_error,omitempty"`
-	LastErrorAt time.Time `json:"last_error_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Phase       string        `json:"phase"`
+	Host        string        `json:"host"`
+	Profile     string        `json:"profile"`
+	Staging     bool          `json:"staging"`
+	NotBefore   time.Time     `json:"not_before,omitempty"`
+	NotAfter    time.Time     `json:"not_after,omitempty"`
+	IssuedAt    time.Time     `json:"issued_at,omitempty"`
+	Renewals    int           `json:"renewals"`
+	LastError   string        `json:"last_error,omitempty"`
+	LastErrorAt time.Time     `json:"last_error_at,omitempty"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	Domain      *DomainStatus `json:"domain,omitempty"`
+}
+
+// DomainStatus is the secret-free state of the OPTIONAL custom-domain
+// certificate slot. It never affects the primary (IP) slot: the top
+// level Status fields always describe the primary certificate.
+type DomainStatus struct {
+	Host      string    `json:"host"`
+	Phase     string    `json:"phase"`
+	NotBefore time.Time `json:"not_before,omitempty"`
+	NotAfter  time.Time `json:"not_after,omitempty"`
+	LastError string    `json:"last_error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// CertValid reports whether the domain slot describes a currently valid
+// certificate (same margins as Status.CertValid).
+func (d DomainStatus) CertValid(now time.Time) bool {
+	if d.Phase != PhaseActive && d.Phase != PhaseRenewing {
+		return false
+	}
+	if d.NotAfter.IsZero() {
+		return false
+	}
+	return now.Before(d.NotAfter.Add(-30 * time.Second))
 }
 
 // StatusPath is the canonical status file location inside the state dir.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/auth"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpapi"
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpsd"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
 )
 
@@ -48,7 +49,17 @@ func run(addr, dataDir string) error {
 	_ = st.PruneSessions(ctx)
 
 	diskPaths := dedupe([]string{"/", dataDir})
-	mux := httpapi.New(st, version, diskPaths)
+	// The access view points the access-mode/domain endpoints at the
+	// same root-managed configuration and secret-free status files the
+	// CLI uses; the overlay directory is where the daemon stores the
+	// optional custom-domain request for the httpsd proxy worker.
+	p := httpsd.RuntimePathsFromEnv()
+	accessView := &httpapi.AccessView{
+		ConfigPath:    p.ConfigPath,
+		HTTPSStateDir: p.StateDir,
+		OverlayDir:    httpsd.OverlayDir(),
+	}
+	mux := httpapi.NewWithAccess(st, version, diskPaths, accessView)
 
 	srv := &http.Server{
 		Addr:              addr,

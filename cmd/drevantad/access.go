@@ -33,6 +33,7 @@ func cmdHTTPServe(args []string) int {
 	fs := flag.NewFlagSet("https-serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", httpsd.DefaultConfigPath, "HTTPS access config file")
 	stateDir := fs.String("state-dir", httpsd.DefaultHTTPStateDir, "certificates and ACME account state")
+	overlayDir := fs.String("overlay-dir", httpsd.OverlayDir(), "optional custom-domain overlay directory (empty disables the domain slot)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -53,10 +54,10 @@ func cmdHTTPServe(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	mgr := httpsd.NewManager(cfg, *stateDir)
+	mgr := httpsd.NewManager(cfg, *stateDir, *overlayDir)
 	go mgr.Run(ctx) // certificate lifecycle (issue, renew, record status)
 
-	slog.Info("drevantad https-serve starting", "host", cfg.Host, "staging", cfg.Staging, "profile", cfg.Profile)
+	slog.Info("drevantad https-serve starting", "host", cfg.Host, "staging", cfg.Staging, "profile", cfg.Profile, "overlay_dir", *overlayDir)
 	if err := httpsd.Serve(ctx, cfg, mgr); err != nil {
 		slogError("drevantad https-serve", err)
 		return 1
@@ -205,12 +206,25 @@ func accessEnableHTTPS(e accessEnv, args []string) int {
 	// (mirrors the config's http01_port/tlsalpn_port test overrides).
 	httpPort := envPort("DREVANTA_HTTP_PORT", 80)
 	httpsPort := envPort("DREVANTA_HTTPS_PORT", 443)
+	// Our own proxy unit legitimately holds 80/443 while it is running:
+	// an upgrade rewrites the unit and restarts it below, which re-binds
+	// the ports. Only a FOREIGN listener is a genuine conflict. (Same
+	// precedent as install.sh's port-8080 check, which recognizes the
+	// existing drevanta service during upgrades.)
+	// systemctl is-active exits 0 iff the unit is active — the exit
+	// status is the reliable signal (some environments print nothing).
+	_, unitActiveErr := e.systemdOutput("is-active", httpsd.UnitName)
 	for _, port := range []int{httpPort, httpsPort} {
-		if !httpsd.PortFree(port) {
-			fmt.Fprintf(e.stderr, "port %d is already in use by another program — free it and retry\n", port)
-			fmt.Fprintln(e.stderr, "hint: ss -tlnp | grep -E ':(80|443)\\b'")
-			return 1
+		if httpsd.PortFree(port) {
+			continue
 		}
+		if unitActiveErr == nil {
+			fmt.Fprintf(e.stdout, "port %d is held by the existing %s service (upgrade); restarting it below re-binds the port\n", port, httpsd.UnitName)
+			continue
+		}
+		fmt.Fprintf(e.stderr, "port %d is already in use by another program — free it and retry\n", port)
+		fmt.Fprintln(e.stderr, "hint: ss -tlnp | grep -E ':(80|443)\\b'")
+		return 1
 	}
 
 	if cfg.Host != host && cfg.Host != "" {
@@ -231,6 +245,12 @@ func accessEnableHTTPS(e accessEnv, args []string) int {
 	if err := ensureProxyUser(e.stderr); err != nil {
 		fmt.Fprintf(e.stderr, "creating the %s service user failed: %v\n", httpsd.ProxyUser, err)
 		return 1
+	}
+	// The custom-domain overlay directory: the daemon (web UI) writes
+	// its secret-free domain.json here, the proxy worker reads it.
+	// Non-fatal: a missing directory only disables the domain slot.
+	if err := ensureOverlayDir(); err != nil {
+		fmt.Fprintf(e.stderr, "note: custom-domain overlay dir unavailable (%v) — the dashboard domain step stays disabled\n", err)
 	}
 	if err := writeProxyUnit(e.configPath, e.stateDir, e.stderr); err != nil {
 		fmt.Fprintf(e.stderr, "writing the systemd unit failed: %v\n", err)
@@ -378,6 +398,25 @@ func ensureProxyUser(stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// ensureOverlayDir creates the shared domain-overlay directory (0755,
+// group of the daemon user when it exists) so the unprivileged daemon
+// can write the secret-free overlay and the proxy worker can read it.
+// Idempotent; safe to call on every enable-https.
+func ensureOverlayDir() error {
+	dir := httpsd.OverlayDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if u, err := user.Lookup("drevanta"); err == nil {
+		if gid, gerr := strconv.Atoi(u.Gid); gerr == nil {
+			if uid, uerr := strconv.Atoi(u.Uid); uerr == nil {
+				_ = os.Chown(dir, uid, gid)
+			}
+		}
+	}
+	return os.Chmod(dir, 0o755)
 }
 
 // httpsUnitContent renders the hardened unit. ReadWritePaths is not
@@ -529,6 +568,19 @@ func accessStatus(e accessEnv, args []string) int {
 		if st.LastError != "" {
 			fmt.Fprintf(e.stdout, "  last error:    %s\n", firstLine(st.LastError))
 		}
+	}
+
+	if ds := st.Domain; ds != nil && ds.Host != "" {
+		fmt.Fprintln(e.stdout, "\nCUSTOM DOMAIN (secondary certificate slot; the IP certificate above keeps serving)")
+		fmt.Fprintf(e.stdout, "  domain:        %s\n", ds.Host)
+		fmt.Fprintf(e.stdout, "  status:        %s\n", ds.Phase)
+		if !ds.NotAfter.IsZero() && (ds.Phase == httpsd.PhaseActive || ds.Phase == httpsd.PhaseRenewing) {
+			fmt.Fprintf(e.stdout, "  valid until:   %s\n", ds.NotAfter.Local().Format("2006-01-02 15:04 MST"))
+		}
+		if ds.LastError != "" {
+			fmt.Fprintf(e.stdout, "  last error:    %s\n", firstLine(ds.LastError))
+		}
+		fmt.Fprintln(e.stdout, "  manage in the dashboard under Settings, or: sudo drevanta access configure")
 	}
 
 	fmt.Fprintln(e.stdout, "\nSSH-TUNNEL FALLBACK (works regardless of HTTPS)")

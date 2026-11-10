@@ -63,7 +63,18 @@ func pebbleRootCAPool(t *testing.T) *x509.CertPool {
 	return pool
 }
 
+// startPebble starts the shared IP-identifier rig.
 func startPebble(t *testing.T, dir string) {
+	t.Helper()
+	startPebbleOn(t, dir, pebbleACME, pebbleMgmt, testHTTPPort, testTLSPort, nil)
+}
+
+// startPebbleOn starts one pebble instance on the given addresses.
+// extraEnv allows PEBBLE_VA_ALWAYS_VALID=1 for the domain-slot rig:
+// pebble's VA would otherwise try to dial the (unresolvable) test
+// domain, while the point of that rig is the SLOT ROUTING, not the
+// challenge network path (already covered by the IP rig above).
+func startPebbleOn(t *testing.T, dir, acmeAddr, mgmtAddr string, httpPort, tlsPort int, extraEnv map[string]string) {
 	t.Helper()
 	bin := os.Getenv("DREVANTA_PEBBLE_BIN")
 	if bin == "" {
@@ -119,9 +130,9 @@ func startPebble(t *testing.T, dir string) {
               "shortlived": {"description": "short-lived IP certs", "validityPeriod": 518400}
             }
           }
-        }`, pebbleACME, pebbleMgmt,
+        }`, acmeAddr, mgmtAddr,
 		filepath.Join(dir, "listener-cert.pem"), filepath.Join(dir, "listener-key.pem"),
-		testHTTPPort, testTLSPort)
+		httpPort, tlsPort)
 	cfgPath := filepath.Join(dir, "pebble-config.json")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -144,7 +155,7 @@ func startPebble(t *testing.T, dir string) {
 		client := &http.Client{Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		}}
-		resp, err := client.Get("https://" + pebbleACME + "/dir")
+		resp, err := client.Get("https://" + acmeAddr + "/dir")
 		if err == nil {
 			_ = resp.Body.Close()
 			return
@@ -185,7 +196,7 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 			TLSALPNPort: testTLSPort,
 		},
 	}
-	f.mgr = NewManager(f.cfg, stateDir)
+	f.mgr = NewManager(f.cfg, stateDir, "")
 
 	// Stub backend recording the headers the proxy forwarded.
 	mux := http.NewServeMux()
@@ -206,7 +217,7 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 	// the issued certificate separately trusts pebble's internal root
 	// CA from the management endpoint.
 	f.cfg.CARoot = filepath.Join(root, "listener-cert.pem")
-	f.mgr = NewManager(f.cfg, stateDir)
+	f.mgr = NewManager(f.cfg, stateDir, "")
 	return f
 }
 
@@ -445,3 +456,234 @@ func TestShouldRenew(t *testing.T) {
 }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// ---------------------------------------------------------------------------
+// Custom-domain slot rig: a second pebble with PEBBLE_VA_ALWAYS_VALID=1
+// (the challenge network path is covered by the IP rig; this rig proves
+// the SLOT ROUTING: independent issuance, SNI selection, and that every
+// domain operation leaves the primary IP certificate serving).
+// ---------------------------------------------------------------------------
+
+const (
+	pebbleACMEDomain   = "127.0.0.1:14001"
+	pebbleMgmtDomain   = "127.0.0.1:15001"
+	testHTTPPortDomain = 28082
+	testTLSPortDomain  = 28444
+	domainTestHost     = "dashboard.example.test"
+)
+
+func newDomainIntegrationFixture(t *testing.T) *integrationFixture {
+	t.Helper()
+	root := t.TempDir()
+	startPebbleOn(t, root, pebbleACMEDomain, pebbleMgmtDomain, testHTTPPortDomain, testTLSPortDomain,
+		map[string]string{"PEBBLE_VA_ALWAYS_VALID": "1"})
+	stateDir := filepath.Join(root, "state")
+	overlayDir := filepath.Join(root, "overlay")
+	f := &integrationFixture{
+		t:        t,
+		stateDir: stateDir,
+		cfg: Config{
+			Enabled:     true,
+			Host:        "127.0.0.1",
+			HTTPPort:    testHTTPPortDomain,
+			HTTPSPort:   testTLSPortDomain,
+			Backend:     "127.0.0.1:19091",
+			Profile:     DefaultProfile,
+			ACMEDir:     "https://" + pebbleACMEDomain + "/dir",
+			CARoot:      filepath.Join(root, "listener-cert.pem"),
+			HTTP01Port:  testHTTPPortDomain,
+			TLSALPNPort: testTLSPortDomain,
+		},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f.backendSeen = r.Header.Clone()
+		_, _ = w.Write([]byte("backend-ok"))
+	})
+	f.backend = &http.Server{Addr: f.cfg.Backend, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	ln, err := net.Listen("tcp", f.cfg.Backend)
+	if err != nil {
+		t.Fatalf("stub backend listen: %v", err)
+	}
+	go func() { _ = f.backend.Serve(ln) }()
+	t.Cleanup(func() { _ = f.backend.Close() })
+
+	f.mgr = NewManager(f.cfg, stateDir, overlayDir)
+	return f
+}
+
+func domainRootCAPool(t *testing.T) *x509.CertPool {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // fetching the root that defines trust
+	}}
+	resp, err := client.Get("https://" + pebbleMgmtDomain + "/roots/0")
+	if err != nil {
+		t.Fatalf("fetch pebble root: %v", err)
+	}
+	defer resp.Body.Close()
+	pemBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatalf("read pebble root: %v", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(pemBytes)
+	return pool
+}
+
+// waitForDomainPhase polls the DOMAIN slot status independently of the
+// primary phase.
+func waitForDomainPhase(t *testing.T, f *integrationFixture, phase string, timeout time.Duration) DomainStatus {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ds := f.mgr.StatusSnapshot().Domain; ds != nil && ds.Phase == phase {
+			return *ds
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	f.t.Fatalf("timed out waiting for domain phase %s (status: %+v)", phase, f.mgr.StatusSnapshot())
+	return DomainStatus{}
+}
+
+// tlsLeafForSNI performs a TLS handshake against the proxy and returns
+// the leaf certificate the server selected for that SNI.
+func tlsLeafForSNI(t *testing.T, addr, serverName string, pool *x509.CertPool) *x509.Certificate {
+	t.Helper()
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+		&tls.Config{ServerName: serverName, RootCAs: pool, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("tls handshake SNI %q: %v", serverName, err)
+	}
+	defer conn.Close()
+	return conn.ConnectionState().PeerCertificates[0]
+}
+
+// TestPebbleDomainSlotKeepsIPPrimary is the production-safety test for
+// the custom-domain onboarding step: the domain certificate issues on
+// its own slot, SNI routes correctly, the backend route works through
+// the domain name — and REMOVING the domain (or failing to issue one)
+// never touches the primary IP certificate.
+func TestPebbleDomainSlotKeepsIPPrimary(t *testing.T) {
+	// Pebble's VA resolves the DNS identifier exactly like a real
+	// validator would. Environments that cannot map the test domain
+	// (no /etc/hosts write access) skip; CI maps it before running.
+	if _, err := net.LookupHost(domainTestHost); err != nil {
+		t.Skipf("%s does not resolve on this host (map it to 127.0.0.1 in /etc/hosts to run the full domain rig): %v", domainTestHost, err)
+	}
+	f := newDomainIntegrationFixture(t)
+	pool := domainRootCAPool(t)
+	client := httpsClientFor(t, pool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.start(ctx)
+
+	// Primary IP certificate first — exactly the real customer sequence.
+	st := waitForPhase(t, f, PhaseActive, 45*time.Second)
+	if st.Host != "127.0.0.1" {
+		t.Fatalf("primary host = %q", st.Host)
+	}
+
+	// Before any overlay: an SNI-less handshake serves the IP certificate.
+	if leaf := tlsLeafForSNI(t, "127.0.0.1:"+itoa(testTLSPortDomain), "", pool); len(leaf.DNSNames) != 0 {
+		t.Fatalf("pre-domain handshake served DNS names %v, want the IP certificate only", leaf.DNSNames)
+	}
+
+	// Apply the domain through the overlay (what the daemon API does).
+	if err := SaveDomainOverlay(f.mgr.overlayDir, domainTestHost); err != nil {
+		t.Fatalf("save overlay: %v", err)
+	}
+	ds := waitForDomainPhase(t, f, PhaseActive, 60*time.Second)
+	if ds.Host != domainTestHost {
+		t.Fatalf("domain status host = %q", ds.Host)
+	}
+	if !ds.NotAfter.After(time.Now()) {
+		t.Fatalf("domain certificate not in the future: %+v", ds)
+	}
+
+	// The primary phase never left active.
+	if snap := f.mgr.StatusSnapshot(); snap.Phase != PhaseActive {
+		t.Fatalf("primary phase during domain issuance = %s, want active", snap.Phase)
+	}
+
+	// SNI routing: domain SNI gets the domain certificate; empty SNI
+	// (the IP-identifier form) keeps getting the primary certificate.
+	domLeaf := tlsLeafForSNI(t, "127.0.0.1:"+itoa(testTLSPortDomain), domainTestHost, pool)
+	found := false
+	for _, n := range domLeaf.DNSNames {
+		if equalHostname(n, domainTestHost) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("domain SNI handshake served cert without %q (SANs: %v)", domainTestHost, domLeaf.DNSNames)
+	}
+	ipLeaf := tlsLeafForSNI(t, "127.0.0.1:"+itoa(testTLSPortDomain), "", pool)
+	if len(ipLeaf.IPAddresses) == 0 || !ipLeaf.IPAddresses[0].Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("empty-SNI handshake no longer serves the IP certificate: %+v", ipLeaf.IPAddresses)
+	}
+
+	// Full route verification through the domain name (what the apply
+	// API does before it reports success): TLS + proxy + backend.
+	dial := &net.Dialer{Timeout: 5 * time.Second}
+	domainClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dial.DialContext(ctx, network, "127.0.0.1:"+itoa(testTLSPortDomain)) // DNS-independent dial
+			},
+			TLSClientConfig: &tls.Config{ServerName: domainTestHost, RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}
+	resp, err := domainClient.Get("https://" + domainTestHost + "/healthz")
+	if err != nil {
+		t.Fatalf("domain route request: %v", err)
+	}
+	body := make([]byte, 64)
+	n, _ := resp.Body.Read(body)
+	resp.Body.Close()
+	if string(body[:n]) != "backend-ok" {
+		t.Fatalf("domain route body = %q", string(body[:n]))
+	}
+	if got := f.backendSeen.Get("X-Forwarded-Host"); got != domainTestHost {
+		t.Fatalf("backend saw X-Forwarded-Host %q, want the domain (CSRF same-origin depends on it)", got)
+	}
+
+	// Removing the domain returns to IP-only, still active, still serving.
+	if err := SaveDomainOverlay(f.mgr.overlayDir, ""); err != nil {
+		t.Fatalf("clear overlay: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.mgr.StatusSnapshot().Domain == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if snap := f.mgr.StatusSnapshot(); snap.Phase != PhaseActive || snap.Domain != nil {
+		t.Fatalf("after removal: primary phase = %s, domain = %+v; want active + nil", snap.Phase, snap.Domain)
+	}
+	// After removal a domain-SNI handshake falls back to the primary (IP)
+	// certificate: inspect without hostname verification — the leaf must
+	// NOT cover the domain anymore.
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp",
+		"127.0.0.1:"+itoa(testTLSPortDomain),
+		&tls.Config{ServerName: domainTestHost, InsecureSkipVerify: true}) //nolint:gosec // inspection, not trust
+	if err != nil {
+		t.Fatalf("post-removal handshake: %v", err)
+	}
+	for _, n := range conn.ConnectionState().PeerCertificates[0].DNSNames {
+		if equalHostname(n, domainTestHost) {
+			_ = conn.Close()
+			t.Fatalf("domain SNI after removal still serves the domain certificate")
+		}
+	}
+	_ = conn.Close()
+	resp, err = client.Get("https://127.0.0.1:" + itoa(testTLSPortDomain) + "/healthz")
+	if err != nil {
+		t.Fatalf("IP request after domain removal: %v", err)
+	}
+	resp.Body.Close()
+}

@@ -185,7 +185,7 @@ func profileManager(t *testing.T, dirURL, host, caRoot string) *Manager {
 		HTTPPort:  testHTTPPort,
 		HTTPSPort: testTLSPort,
 	}
-	return NewManager(cfg, t.TempDir())
+	return NewManager(cfg, t.TempDir(), "")
 }
 
 // TestIssueOnce_SendsShortlivedProfileForIPHost is THE production
@@ -301,7 +301,7 @@ func TestResolveProfile_Table(t *testing.T) {
 				caRoot = mock.caRoot
 			}
 			mgr := profileManager(t, dirURL, tc.host, caRoot)
-			prof, err := mgr.resolveProfile(context.Background())
+			prof, err := mgr.resolveProfileFor(context.Background(), tc.host)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("resolveProfile = (%q, nil), want error", prof)

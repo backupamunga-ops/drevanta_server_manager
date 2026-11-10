@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
@@ -210,27 +211,57 @@ var (
 // Manager
 // ---------------------------------------------------------------------------
 
-// Manager owns certificate lifecycle for one configured host.
+// Manager owns certificate lifecycle. The PRIMARY slot is always the
+// certificate for cfg.Host (the VPS public IP in the default install);
+// the optional custom-domain overlay adds one INDEPENDENT secondary
+// slot. A domain problem can never take the IP certificate away.
 type Manager struct {
-	cfg      Config
-	stateDir string
-	store    *challengeStore
+	cfg        Config
+	stateDir   string
+	overlayDir string
+	store      *challengeStore
 
 	mu     sync.Mutex
-	served *tls.Certificate // currently served certificate (nil = none)
+	served *tls.Certificate // primary slot: certificate for cfg.Host (nil = none)
 	status Status
+
+	// Secondary (custom-domain) slot state, guarded by mu.
+	domain       string           // desired/active domain ("" = none)
+	domainServed *tls.Certificate // domain slot certificate (nil = none)
+
+	// acmeMu serializes loadAccount: the registration cache file is
+	// shared by the primary and domain issuance paths.
+	acmeMu sync.Mutex
+
+	// domainBusy marks a running domain issuance goroutine (atomic use).
+	domainBusy atomic.Bool
 }
 
-// NewManager builds the manager; no I/O happens here.
-func NewManager(cfg Config, stateDir string) *Manager {
-	return &Manager{cfg: cfg, stateDir: stateDir, store: newChallengeStore()}
+// NewManager builds the manager; no I/O happens here. overlayDir may be
+// empty to disable the custom-domain overlay (test rigs).
+func NewManager(cfg Config, stateDir, overlayDir string) *Manager {
+	return &Manager{cfg: cfg, stateDir: stateDir, overlayDir: overlayDir, store: newChallengeStore()}
 }
 
-// ServedCert returns the certificate to use for normal handshakes, or
-// nil when none is valid (fail closed: no cert, no TLS service).
+// ServedCert returns the PRIMARY certificate (for cfg.Host), or nil
+// when none is valid (fail closed: no cert, no TLS service for the
+// primary host).
 func (m *Manager) ServedCert() *tls.Certificate {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.served
+}
+
+// servedCertForSNI selects the certificate for one handshake: the
+// domain slot when the SNI matches the configured domain and that slot
+// has a certificate, otherwise the primary slot. An empty SNI (the
+// RFC 8738 IP-identifier case) always reaches the primary certificate.
+func (m *Manager) servedCertForSNI(serverName string) *tls.Certificate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if serverName != "" && m.domain != "" && equalHostname(serverName, m.domain) && m.domainServed != nil {
+		return m.domainServed
+	}
 	return m.served
 }
 
@@ -272,13 +303,14 @@ func (m *Manager) setStatusFull(st Status) {
 }
 
 // ChallengeHook returns the GetCertificate hook combining the ACME
-// tls-alpn-01 answer with the currently served certificate.
+// tls-alpn-01 answer with the certificates currently being served
+// (primary slot, plus the domain slot when its SNI matches).
 func (m *Manager) ChallengeHook() func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		if cert, ok := m.store.challengeCertFor(hello); ok {
 			return cert, nil
 		}
-		if cert := m.ServedCert(); cert != nil {
+		if cert := m.servedCertForSNI(hello.ServerName); cert != nil {
 			return cert, nil
 		}
 		return nil, errors.New("httpsd: no certificate available for this handshake")
@@ -291,8 +323,12 @@ func (m *Manager) HTTP01ChallengeValue(token string) (string, bool) {
 	return m.store.http01KeyAuth(token)
 }
 
-// loadAccount builds the lego client with the persistent account.
+// loadAccount builds the lego client with the persistent account. The
+// call is serialized (acmeMu) because the registration cache file is
+// shared by the primary and the custom-domain issuance paths.
 func (m *Manager) loadAccount(ctx context.Context) (*lego.Client, error) {
+	m.acmeMu.Lock()
+	defer m.acmeMu.Unlock()
 	key, err := loadOrCreateAccountKey(m.stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("acme account key: %w", err)
@@ -418,7 +454,7 @@ func advertisedList(profiles map[string]string) string {
 // profile, issuance aborts with a clear error instead of silently
 // requesting a default-profile order. DNS-name orders may fall back to
 // the CA default, which every ACME CA supports.
-func (m *Manager) resolveProfile(ctx context.Context) (string, error) {
+func (m *Manager) resolveProfileFor(ctx context.Context, host string) (string, error) {
 	httpClient := http.DefaultClient
 	if m.cfg.CARoot != "" {
 		pool, err := lego.CreateCertPool([]string{m.cfg.CARoot}, true)
@@ -430,7 +466,7 @@ func (m *Manager) resolveProfile(ctx context.Context) (string, error) {
 	}
 	profiles, err := fetchAdvertisedProfiles(ctx, httpClient, m.cfg.ACMEDir)
 	if err != nil {
-		if isIPIdentifier(m.cfg.Host) {
+		if isIPIdentifier(host) {
 			return "", fmt.Errorf(
 				"cannot verify that the ACME directory %s advertises the %q profile required for IP-address certificates: %v — refusing to request a default-profile order",
 				m.cfg.ACMEDir, m.cfg.Profile, err)
@@ -442,7 +478,7 @@ func (m *Manager) resolveProfile(ctx context.Context) (string, error) {
 	if _, ok := profiles[m.cfg.Profile]; ok {
 		return m.cfg.Profile, nil
 	}
-	if isIPIdentifier(m.cfg.Host) {
+	if isIPIdentifier(host) {
 		return "", fmt.Errorf(
 			"the ACME directory %s does not advertise the %q profile required for IP-address certificates (advertised: %s) — refusing to request a default-profile order",
 			m.cfg.ACMEDir, m.cfg.Profile, advertisedList(profiles))
@@ -452,9 +488,10 @@ func (m *Manager) resolveProfile(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// LoadCertIfValid loads a previously issued certificate from disk and,
-// when still valid, starts serving it immediately (fast restarts, no
-// pointless ACME traffic). Returns true when a valid cert is active.
+// LoadCertIfValid loads previously issued certificates from disk and,
+// when still valid, starts serving them immediately (fast restarts, no
+// pointless ACME traffic). Returns true when a valid primary cert is
+// active.
 func (m *Manager) LoadCertIfValid() (bool, error) {
 	certPath := filepath.Join(m.stateDir, "certs", "cert.pem")
 	keyPath := filepath.Join(m.stateDir, "certs", "key.pem")
@@ -481,45 +518,56 @@ func (m *Manager) LoadCertIfValid() (bool, error) {
 		return false, errors.New("stored certificate has no parsed leaf")
 	}
 	now := time.Now()
-	if now.After(leaf.NotAfter.Add(-30*time.Second)) || now.Before(leaf.NotBefore.Add(-time.Minute)) {
-		return false, nil
+	valid := !now.After(leaf.NotAfter.Add(-30*time.Second)) && !now.Before(leaf.NotBefore.Add(-time.Minute))
+	if valid {
+		m.mu.Lock()
+		m.served = &cert
+		m.status.Phase = PhaseActive
+		m.status.Host = m.cfg.Host
+		m.status.Profile = m.cfg.Profile
+		m.status.Staging = m.cfg.Staging
+		m.status.NotBefore = leaf.NotBefore
+		m.status.NotAfter = leaf.NotAfter
+		cur := m.status
+		m.mu.Unlock()
+		_ = WriteStatus(m.stateDir, cur)
 	}
-	m.mu.Lock()
-	m.served = &cert
-	m.status.Phase = PhaseActive
-	m.status.Host = m.cfg.Host
-	m.status.Profile = m.cfg.Profile
-	m.status.Staging = m.cfg.Staging
-	m.status.NotBefore = leaf.NotBefore
-	m.status.NotAfter = leaf.NotAfter
-	cur := m.status
-	m.mu.Unlock()
-	_ = WriteStatus(m.stateDir, cur)
-	return true, nil
+	// The domain slot is independent: a stored domain certificate is
+	// loaded even when the primary slot needs reissuing.
+	m.loadDomainCertIfValid(now)
+	return valid, nil
 }
 
-// IssueOnce obtains (or re-obtains) the certificate for cfg.Host via a
-// fresh ACME order and swaps it into the live TLS configuration.
+// IssueOnce obtains (or re-obtains) the PRIMARY certificate for
+// cfg.Host via a fresh ACME order and swaps it into the live TLS
+// configuration.
 func (m *Manager) IssueOnce(ctx context.Context) error {
 	client, err := m.loadAccount(ctx)
 	if err != nil {
 		return err
 	}
-	profile, err := m.resolveProfile(ctx)
+	return m.issueFor(ctx, client, m.cfg.Host, "certs")
+}
+
+// issueFor runs one ACME order for host and stores the result in
+// certDirName ("certs" = primary slot, "certs-domain" = domain slot),
+// swapping the in-memory certificate only after a successful order.
+func (m *Manager) issueFor(ctx context.Context, client *lego.Client, host, certDirName string) error {
+	profile, err := m.resolveProfileFor(ctx, host)
 	if err != nil {
 		return err
 	}
 	req := certificate.ObtainRequest{
-		Domains: []string{m.cfg.Host},
+		Domains: []string{host},
 		Profile: profile,
 		Bundle:  true,
 	}
 	res, err := client.Certificate.Obtain(req)
 	if err != nil {
-		return fmt.Errorf("acme order for %s: %w", m.cfg.Host, err)
+		return fmt.Errorf("acme order for %s: %w", host, err)
 	}
 
-	certDir := filepath.Join(m.stateDir, "certs")
+	certDir := filepath.Join(m.stateDir, certDirName)
 	if err := os.MkdirAll(certDir, 0o750); err != nil {
 		return err
 	}
@@ -543,6 +591,13 @@ func (m *Manager) IssueOnce(ctx context.Context) error {
 		return errors.New("issued certificate has no parsed leaf")
 	}
 
+	if certDirName == "certs-domain" {
+		m.setDomainServed(host, &cert)
+		slog.Info("httpsd: domain certificate active", "host", host,
+			"not_after", leaf.NotAfter.Format(time.RFC3339))
+		return nil
+	}
+
 	m.mu.Lock()
 	prev := m.status
 	renewals := prev.Renewals
@@ -559,10 +614,11 @@ func (m *Manager) IssueOnce(ctx context.Context) error {
 		NotAfter:  leaf.NotAfter,
 		IssuedAt:  time.Now().UTC(),
 		Renewals:  renewals,
+		Domain:    prev.Domain,
 	}
 	cur := m.status
 	m.mu.Unlock()
-	slog.Info("httpsd: certificate active", "host", m.cfg.Host,
+	slog.Info("httpsd: certificate active", "host", host,
 		"not_after", leaf.NotAfter.Format(time.RFC3339), "renewals", renewals)
 	return WriteStatus(m.stateDir, cur)
 }
@@ -594,6 +650,12 @@ func (m *Manager) Run(ctx context.Context) {
 		}
 	}
 
+	// The optional custom-domain slot watches its overlay independently;
+	// it can never affect the primary issuance above.
+	if m.overlayDir != "" {
+		go m.watchDomainOverlay(ctx)
+	}
+
 	ticker := time.NewTicker(renewCheckInterval)
 	defer ticker.Stop()
 	for {
@@ -605,6 +667,10 @@ func (m *Manager) Run(ctx context.Context) {
 		now := time.Now()
 		snap := m.StatusSnapshot()
 		if !ShouldRenew(snap, now) {
+			// Primary is fine; still give the domain slot its independent
+			// renewal check (a shortlived domain cert renews on its own
+			// schedule and must never block or be blocked by the primary).
+			m.renewDomainIfDue(ctx, now)
 			continue
 		}
 		if snap.Phase == PhaseActive {
@@ -626,7 +692,24 @@ func (m *Manager) Run(ctx context.Context) {
 				}
 			}
 		}
+		m.renewDomainIfDue(ctx, now)
 	}
+}
+
+// renewDomainIfDue re-issues the domain certificate when its own
+// renewal policy says so (async; never blocks the primary loop).
+func (m *Manager) renewDomainIfDue(ctx context.Context, now time.Time) {
+	ds := m.StatusSnapshot().Domain
+	if ds == nil || ds.Host == "" || !ds.CertValid(now) {
+		return
+	}
+	if !ShouldRenew(Status{NotBefore: ds.NotBefore, NotAfter: ds.NotAfter}, now) {
+		return
+	}
+	if m.domainBusy.Load() {
+		return // a transition/issuance is already running
+	}
+	go m.renewDomain(ctx, ds.Host)
 }
 
 // issueWithRetry runs IssueOnce with a short backoff ladder so a slow
