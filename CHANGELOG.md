@@ -4,6 +4,17 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.6] — access-status readability fix
+
+### Fixed
+- **`/api/v1/access/status` reported `cert_valid:false` (and the claim
+  screen fell back to the tunnel link) on real installs**: the
+  `drevanta-https` unit's `UMask=0027` masked the secret-free
+  `status.json` down to `0640`, so the unprivileged daemon user could
+  not read it. `WriteStatus` now enforces `0644` explicitly (pinned by
+  a umask-restrictive regression test). No other file or permission
+  changed; certificate private keys remain `0600`.
+
 ## [0.4.5] — post-install UX & maintenance: optional MFA, custom domain, installer cleanup
 
 ### Added

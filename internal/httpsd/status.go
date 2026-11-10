@@ -79,6 +79,13 @@ func WriteStatus(stateDir string, st Status) error {
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		return err
 	}
+	// The 0644 is deliberate (secret-free, read by the unprivileged
+	// drevanta user for the claim screen and the access endpoints) but a
+	// restrictive unit UMask (0027) would mask it down to 0640 and break
+	// that boundary. Enforce the mode explicitly.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
 	return os.Rename(tmp, StatusPath(stateDir))
 }
 
