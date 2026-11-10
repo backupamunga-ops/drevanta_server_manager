@@ -113,7 +113,11 @@ func startPebble(t *testing.T, dir string) {
             "httpPort": %d,
             "tlsPort": %d,
             "externalAccountBindingRequired": false,
-            "domainBlocklist": []
+            "domainBlocklist": [],
+            "profiles": {
+              "default":  {"description": "default", "validityPeriod": 7776000},
+              "shortlived": {"description": "short-lived IP certs", "validityPeriod": 518400}
+            }
           }
         }`, pebbleACME, pebbleMgmt,
 		filepath.Join(dir, "listener-cert.pem"), filepath.Join(dir, "listener-key.pem"),
@@ -174,7 +178,7 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 			HTTPPort:    testHTTPPort,
 			HTTPSPort:   testTLSPort,
 			Backend:     "127.0.0.1:19090",
-			Profile:     DefaultProfile, // pebble does not advertise it; resolveProfile omits it
+			Profile:     DefaultProfile, // pebble advertises it (see startPebble); the fixed resolveProfile sends it
 			ACMEDir:     "https://" + pebbleACME + "/dir",
 			CARoot:      "", // trust via the pool client below is per-request; lego uses CARoot only
 			HTTP01Port:  testHTTPPort,

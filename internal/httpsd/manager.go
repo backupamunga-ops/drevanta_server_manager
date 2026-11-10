@@ -14,9 +14,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -345,13 +348,77 @@ func (m *Manager) loadAccount(ctx context.Context) (*lego.Client, error) {
 	return client, nil
 }
 
-// resolveProfile applies the requested ACME profile only when the CA
-// actually advertises it in its directory metadata (ACME profiles
-// extension). Let's Encrypt advertises "shortlived"; smaller test CAs
-// (pebble) do not — omitting the field there keeps the same code path
-// testable, and for IP identifiers Let's Encrypt selects a short-lived
-// certificate automatically even without the profile field.
-func (m *Manager) resolveProfile() string {
+// isIPIdentifier reports whether the certificate subject is an IP
+// address (RFC 8738 order) rather than a DNS name.
+func isIPIdentifier(host string) bool {
+	return net.ParseIP(host) != nil
+}
+
+// fetchAdvertisedProfiles fetches the CA directory document and returns
+// the profile names it advertises. The ACME profiles extension places
+// the map at the top level of the directory object; Let's Encrypt's
+// production directory currently publishes it under "meta" instead.
+// Both shapes are accepted; an empty result means "no profiles
+// advertised".
+func fetchAdvertisedProfiles(ctx context.Context, httpClient *http.Client, dirURL string) (map[string]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dirURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", dirURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch %s: HTTP %d", dirURL, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Profiles map[string]string `json:"profiles"`
+		Meta     struct {
+			Profiles map[string]string `json:"profiles"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return nil, fmt.Errorf("parse %s: not a JSON directory document", dirURL)
+	}
+	if len(doc.Profiles) > 0 {
+		return doc.Profiles, nil
+	}
+	return doc.Meta.Profiles, nil
+}
+
+// advertisedList renders the advertised profile names for error
+// messages.
+func advertisedList(profiles map[string]string) string {
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// resolveProfile decides which ACME profile the new-order request asks
+// for.
+//
+// A CA advertises the profiles it supports in its directory document —
+// at the top level per the ACME profiles extension, or under "meta" as
+// Let's Encrypt's production directory does today. The requested profile
+// is only sent when the CA advertises it.
+//
+// Fail closed for IP-identifier orders: the profile is mandatory there.
+// Let's Encrypt's default profile rejects IP identifiers outright
+// ("Default profile does not permit IP address identifiers."), so when
+// the advertisement cannot be read or does not include the requested
+// profile, issuance aborts with a clear error instead of silently
+// requesting a default-profile order. DNS-name orders may fall back to
+// the CA default, which every ACME CA supports.
+func (m *Manager) resolveProfile(ctx context.Context) (string, error) {
 	httpClient := http.DefaultClient
 	if m.cfg.CARoot != "" {
 		pool, err := lego.CreateCertPool([]string{m.cfg.CARoot}, true)
@@ -361,32 +428,28 @@ func (m *Manager) resolveProfile() string {
 			httpClient = hc
 		}
 	}
-	req, err := http.NewRequest(http.MethodGet, m.cfg.ACMEDir, nil)
+	profiles, err := fetchAdvertisedProfiles(ctx, httpClient, m.cfg.ACMEDir)
 	if err != nil {
-		return ""
+		if isIPIdentifier(m.cfg.Host) {
+			return "", fmt.Errorf(
+				"cannot verify that the ACME directory %s advertises the %q profile required for IP-address certificates: %v — refusing to request a default-profile order",
+				m.cfg.ACMEDir, m.cfg.Profile, err)
+		}
+		slog.Warn("httpsd: could not fetch ACME directory metadata; requesting a default-profile order",
+			"err", err, "directory", m.cfg.ACMEDir)
+		return "", nil
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		slog.Warn("httpsd: could not fetch ACME directory metadata", "err", err)
-		return ""
+	if _, ok := profiles[m.cfg.Profile]; ok {
+		return m.cfg.Profile, nil
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return ""
-	}
-	var meta struct {
-		Profiles map[string]string `json:"profiles"`
-	}
-	if json.Unmarshal(body, &meta) != nil {
-		return ""
-	}
-	if _, ok := meta.Profiles[m.cfg.Profile]; ok {
-		return m.cfg.Profile
+	if isIPIdentifier(m.cfg.Host) {
+		return "", fmt.Errorf(
+			"the ACME directory %s does not advertise the %q profile required for IP-address certificates (advertised: %s) — refusing to request a default-profile order",
+			m.cfg.ACMEDir, m.cfg.Profile, advertisedList(profiles))
 	}
 	slog.Warn("httpsd: CA does not advertise the requested profile; requesting a default-profile order",
 		"requested", m.cfg.Profile, "directory", m.cfg.ACMEDir)
-	return ""
+	return "", nil
 }
 
 // LoadCertIfValid loads a previously issued certificate from disk and,
@@ -442,9 +505,13 @@ func (m *Manager) IssueOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	profile, err := m.resolveProfile(ctx)
+	if err != nil {
+		return err
+	}
 	req := certificate.ObtainRequest{
 		Domains: []string{m.cfg.Host},
-		Profile: m.resolveProfile(),
+		Profile: profile,
 		Bundle:  true,
 	}
 	res, err := client.Certificate.Obtain(req)
