@@ -138,8 +138,8 @@ sudo drevanta access configure       # change IP/domain/email/staging on an exis
 - Fresh installs attempt HTTPS once automatically (`install.sh --https
   auto|yes|no`); **upgrades never change the access configuration on
   their own** — on existing machines, enable HTTPS explicitly.
-- Development VPS policy: public HTTPS stays DISABLED on
-  95.211.164.33 until the operator explicitly authorizes external
+- Development VPS policy: public HTTPS stays DISABLED on the
+  development VPS until the operator explicitly authorizes external
   exposure (ports 80/443 + provider firewall). All HTTPS logic is
   validated against pebble in CI and in local test rigs instead.
 

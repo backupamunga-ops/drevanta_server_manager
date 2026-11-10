@@ -27,12 +27,13 @@ no domain required) with the SSH tunnel as the permanent private
 fallback, the `drevanta access` CLI, and the compact onboarding UI.
 Release artifacts publish via signed GitHub Releases
 (`checksums.txt.sig`, Ed25519); the one-command URL in the installation
-guide resolves against those releases. The first person to present the
-single-use claim token becomes the administrator through a browser
-wizard (credentials, TOTP MFA with recovery codes, or an explicit,
-audited MFA skip). The daemon, API, dashboard, SQLite audit store,
-hardened systemd service, CI, and deployment model are unchanged in
-spirit and preserved.
+guide resolves against those releases and works as soon as the
+repository and its releases are publicly reachable. The first person
+to present the single-use claim token becomes the administrator
+through a browser wizard (credentials, TOTP MFA with recovery codes,
+or an explicit, audited MFA skip). The daemon, API, dashboard, SQLite
+audit store, hardened systemd service, CI, and deployment model are
+unchanged in spirit and preserved.
 
 ## Security model (Sprint 1)
 
@@ -93,20 +94,21 @@ sudo drevanta claim regenerate         # fresh one-time setup link, invalidates 
 sudo drevanta claim status             # onboarding state (no secrets)
 ```
 
-The public one-command installer (`deploy/bootstrap.sh`) is implemented
-and harness-tested but **not published**: it activates together with the
-first tagged release (the release workflow publishes its verified
-payload automatically). Full walkthrough for first-time VPS owners:
+The public one-command installer (`deploy/bootstrap.sh`) is implemented,
+harness-tested and published: every tag produces a signed GitHub Release
+(checksums + Ed25519 signature), and the one-command installation works
+as soon as the repository and its releases are publicly reachable.
+Full walkthrough for first-time VPS owners:
 `docs/INSTALLATION.md`. Re-running the installer is always safe
 (idempotent; upgrades roll back automatically if `/readyz` fails;
 `--skip-claim` defers token handling entirely).
 
-## Accessing the deployed dev instance
+## Accessing a deployed instance (SSH tunnel)
 
 The daemon is loopback-only on the VPS. From your workstation:
 
 ```sh
-ssh -N -L 18080:127.0.0.1:8080 root@95.211.164.33
+ssh -N -L 18080:127.0.0.1:8080 root@YOUR_VPS_IP
 # then open http://127.0.0.1:18080/
 ```
 
