@@ -4,7 +4,7 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
-## [0.3.1-onboard-ux] — 2026-11-10
+## [0.3.2-onboard-ux] — 2026-11-10
 
 Locked first-time installation UX: the claim token reaches the operator
 as a ready-to-open setup link in the installer output — no hidden files,
@@ -54,6 +54,10 @@ no agent hand-off. Onboarding flow unchanged (design LOCKED).
   claim).
 - Web: `node --test` unit tests for fragment parsing, navigation-entry
   fallback, and clean-URL building (8 tests); wired into CI.
+- Dashboard handler: `/onboarding` and `/login` serve their prerendered
+  pages directly (previously the SPA fallback answered for them —
+  functionally resolved by the client router, but the raw HTML was the
+  wrong page). Go tests pin the mapping and the unknown-route fallback.
 
 ## [0.2.2-sprint2] — 2026-11-10
 

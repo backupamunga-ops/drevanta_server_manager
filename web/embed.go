@@ -17,6 +17,16 @@ import (
 //go:embed all:build
 var files embed.FS
 
+// prettyPages maps client-side route paths to their prerendered SvelteKit
+// pages, so /onboarding and /login serve the real page instead of the SPA
+// fallback (the client router would resolve them anyway; serving the
+// prerendered HTML is one less hydration hop and keeps tunnel-side checks
+// like curl truthful).
+var prettyPages = map[string]string{
+	"onboarding": "onboarding.html",
+	"login":      "login.html",
+}
+
 // Handler serves the embedded static dashboard with an index.html
 // fallback for client-side routes and long-lived cache headers for
 // SvelteKit's immutable hashed assets.
@@ -33,6 +43,12 @@ func Handler() http.Handler {
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p == "" {
 			p = "index.html"
+		}
+		if mapped, ok := prettyPages[p]; ok {
+			if _, err := fs.Stat(sub, mapped); err == nil {
+				p = mapped
+				r.URL.Path = "/" + mapped
+			}
 		}
 		if _, err := fs.Stat(sub, p); err != nil {
 			// Unknown path: serve the SPA entry point.

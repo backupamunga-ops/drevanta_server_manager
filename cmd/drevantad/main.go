@@ -31,7 +31,7 @@ import (
 )
 
 // version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.3.1-onboard-ux"
+var version = "0.3.2-onboard-ux"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
