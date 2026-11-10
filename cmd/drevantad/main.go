@@ -38,7 +38,7 @@ import (
 )
 
 // version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.4.0-access"
+var version = "0.4.1-access"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
