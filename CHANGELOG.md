@@ -4,6 +4,22 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.3] — release integrity
+
+### Fixed
+- **Binary version now matches the release tag.** Tag `v0.4.2` shipped a
+  binary self-reporting `0.4.1-access` (cosmetic, but it confused release
+  identification and the installer's release-directory naming). The release
+  workflow now stamps `main.version` from the pushed tag and fails closed if
+  the built binary does not report it exactly.
+
+### Added
+- **Proprietary license notice** (`LICENSE`, README "License" section,
+  `license: "UNLICENSED"` in the dashboard's `package.json`): Drevanta is
+  proprietary software; repository visibility grants no redistribution or
+  relicensing rights, and release artifacts may be installed and evaluated
+  on servers you own or control under the evaluation grant.
+
 ## [0.4.0-access] — one-command install, direct HTTPS to the VPS IP, compact onboarding
 
 ### Added

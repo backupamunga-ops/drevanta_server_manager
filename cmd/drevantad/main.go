@@ -37,8 +37,11 @@ import (
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
 )
 
-// version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.4.1-access"
+// version is stamped via -ldflags "-X main.version=..." in release builds;
+// the release workflow injects the pushed tag (v0.4.3 -> "0.4.3") and fails
+// closed if the built binary does not report it. This literal is only the
+// fallback for local, non-release builds.
+var version = "0.4.3"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.

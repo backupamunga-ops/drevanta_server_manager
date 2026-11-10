@@ -50,9 +50,17 @@ jobs:
         run: |
           (cd web && npm ci && npm run build)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags='-s -w' \
+            go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#v}" \
             -o dist/drevantad-linux-amd64 ./cmd/drevantad
-          ./dist/drevantad-linux-amd64 version
+          built="$(./dist/drevantad-linux-amd64 version)"
+          echo "binary version: $built (release ${GITHUB_REF_NAME})"
+          # Fail closed on version drift: the binary must report the tag
+          # exactly, so the installer's release directory and `drevantad
+          # version` always match the published release.
+          if [[ "$built" != "${GITHUB_REF_NAME#v}" ]]; then
+            echo "ERROR: binary reports '$built' but the tag is '${GITHUB_REF_NAME#v}'" >&2
+            exit 1
+          fi
 
       - name: Assemble release payload
         run: |
