@@ -14,10 +14,16 @@
 #   3. Installs the hardened, unprivileged systemd unit (user "drevanta")
 #      and enables + starts it.
 #   4. Installs the friendly "drevanta" front-end (sudo drevanta claim
-#      regenerate) in $BIN_LINK_DIR.
+#      regenerate, sudo drevanta access ...) in $BIN_LINK_DIR.
 #   5. Waits for GET /readyz. On failure it rolls the symlink back to the
 #      previous release automatically and reports the journal excerpt.
-#   6. For a fresh (unclaimed) instance it issues the single-use, expiring
+#   6. On a FRESH (unclaimed) install it attempts public HTTPS
+#      provisioning once (--https auto|yes|no): a publicly trusted
+#      certificate for the VPS public IP via the separate drevanta-https
+#      proxy. On success the setup link is https://YOUR_VPS_IP/...; on
+#      failure it prints the SSH-tunnel fallback and a retry command.
+#      Upgrades never change the access configuration on their own.
+#   7. For a fresh (unclaimed) instance it issues the single-use, expiring
 #      first-owner claim token and prints it ONCE (optionally also to
 #      --token-file, mode 0600). --skip-claim defers the token entirely.
 #
@@ -42,6 +48,12 @@ BIND_ADDR="${DREVANTA_BIND_ADDR:-127.0.0.1}"
 TUNNEL_LOCAL_PORT="${DREVANTA_TUNNEL_LOCAL_PORT:-18080}"
 # Where the friendly "drevanta" front-end is installed.
 BIN_LINK_DIR="${DREVANTA_BIN_LINK_DIR:-/usr/local/bin}"
+# Public HTTPS on fresh install: auto (attempt once when prerequisites
+# allow), yes (always attempt, incl. upgrades), no (never). Upgrades in
+# auto mode NEVER touch the access configuration.
+HTTPS_MODE="${DREVANTA_HTTPS_MODE:-auto}"
+# Max seconds to wait for the first certificate during install.
+HTTPS_WAIT="${DREVANTA_HTTPS_WAIT:-90}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_BINARY="${SCRIPT_DIR}/../dist/drevantad-linux-amd64"
@@ -522,9 +534,14 @@ ssh_hint() {
 }
 
 print_success_screen() {
-        local token="$1" target_file="$2"
+        local token="$1" target_file="$2" https_reason="$3"
         local ttl_disp="$CLAIM_TTL"
         [[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
+
+        if [[ -n "${HTTPS_HOST:-}" ]]; then
+                print_https_success_screen "$token" "$target_file"
+                return 0
+        fi
 
         local hint ip user disp_ip disp_user note=""
         hint="$(ssh_hint)"
@@ -541,29 +558,41 @@ print_success_screen() {
 
 ✓ DREVANTA INSTALLED SUCCESSFULLY
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Drevanta is running securely.
+EOF
+        if [[ -n "$https_reason" ]]; then
+        cat <<EOF
 
-  Welcome to Drevanta!
+  Direct HTTPS could not be configured:
+  ${https_reason}
+EOF
+        fi
+        cat <<EOF
 
-  Your server is ready for first-time setup.
+  PRIVATE ACCESS
 
-  STEP 1 - On your computer, run:
+  On your computer (NOT inside this VPS shell), open a terminal and run:
 
-  ssh -N -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${PORT} ${disp_user}@${disp_ip}
+  ssh -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${PORT} ${disp_user}@${disp_ip}
 
-  STEP 2 - Open this link:
+  Keep this SSH connection open. (Already connected with plain
+  "ssh user@ip"? Forwarding only applies to NEW connections —
+  reconnect with the command above or open a second local terminal.)
+
+  Then open:
 
   ${link}
 
   Token expires in ${ttl_disp}.
   This link can be used only once.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
   Raw token (fallback): ${token}
 
   Lost this link or it expired? Run on the VPS:
   sudo drevanta claim regenerate
+
+  To retry public HTTPS later:
+  sudo drevanta access enable-https
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
@@ -575,8 +604,96 @@ EOF
         fi
 }
 
+# §6 success screen when trusted HTTPS went live during a fresh install.
+print_https_success_screen() {
+        local token="$1" target_file="$2"
+        local ttl_disp="$CLAIM_TTL"
+        [[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
+
+        cat <<EOF
+
+✓ DREVANTA INSTALLED SUCCESSFULLY
+
+  Your private server console is ready.
+
+  OPEN DREVANTA IN YOUR BROWSER
+
+  https://${HTTPS_HOST}/onboarding#token=${token}
+
+  Your setup link expires in ${ttl_disp}
+  and can be used only once.
+
+  Lost or expired your link?
+  sudo drevanta claim regenerate
+
+  SECURE ACCESS
+  HTTPS enabled · Certificate valid
+
+  No domain required.
+
+  (Private fallback, if direct HTTPS ever stops working:
+   ssh -L ${TUNNEL_LOCAL_PORT}:127.0.0.1:${PORT} USER@YOUR_VPS_IP
+   then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/ )
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+        if [[ -n "$target_file" ]]; then
+                info "a copy of the token is also saved root-only: $target_file - delete it after onboarding"
+        fi
+        info "manage public HTTPS any time: sudo drevanta access status | enable-https | disable-https"
+}
+
+# attempt_https_provisioning runs the root-only access CLI once and
+# captures the outcome. On success HTTPS_HOST is set; on failure
+# HTTPS_REASON carries a short diagnostic for the fallback screen.
+# Every failure is non-fatal for the installation itself.
+attempt_https_provisioning() {
+        HTTPS_HOST=""
+        HTTPS_REASON=""
+        log "attempting public HTTPS provisioning (this may take up to ${HTTPS_WAIT}s)"
+        local out rc
+        out="$("$OPT_DIR/current/drevantad" access enable-https --wait "${HTTPS_WAIT}s" 2>&1)" && rc=0 || rc=$?
+        if [[ $rc -eq 0 ]] && grep -q "PUBLIC HTTPS IS LIVE" <<<"$out"; then
+                HTTPS_HOST="$(sed -n 's|.*https://\([^/ ]*\)/.*|\1|p' <<<"$out" | head -n1)"
+                if [[ -n "$HTTPS_HOST" ]]; then
+                        ok "public HTTPS is live: https://${HTTPS_HOST}/"
+                        return 0
+                fi
+        fi
+        HTTPS_REASON="$(sed -n 's/^[[:space:]]*Last reported reason:[[:space:]]*//p' <<<"$out" | head -n1)"
+        if [[ -z "$HTTPS_REASON" ]]; then
+                # Prefer a real error line over incidental progress output.
+                HTTPS_REASON="$(grep -m1 -E 'failed:|refused|error:|ERROR' <<<"$out" | cut -c1-160)"
+        fi
+        if [[ -z "$HTTPS_REASON" ]]; then
+                HTTPS_REASON="$(head -n1 <<<"$out" | sed 's/^==> //' | cut -c1-160)"
+        fi
+        [[ -n "$HTTPS_REASON" ]] || HTTPS_REASON="unknown error (see: sudo drevanta access status)"
+        warn "direct HTTPS could not be configured: $HTTPS_REASON"
+        return 1
+}
+
 issue_claim_token() {
         STEP="claim token"
+        local fresh_install="$2"
+        # Public HTTPS: auto attempts exactly once, on a FRESH install
+        # only; upgrades never change the access configuration on their
+        # own. --https=yes forces an attempt (explicit operator choice);
+        # --https=no never attempts. Failures are non-fatal by design.
+        HTTPS_HOST=""
+        HTTPS_REASON=""
+        local want_https=0
+        case "$HTTPS_MODE" in
+                no)   want_https=0 ;;
+                yes)  want_https=1 ;;
+                auto) [[ "$fresh_install" == "1" ]] && want_https=1 ;;
+                *)    die "invalid --https mode '$HTTPS_MODE' (auto|yes|no)" ;;
+        esac
+        if [[ $want_https -eq 1 ]]; then
+                attempt_https_provisioning || true
+        elif [[ "$fresh_install" != "1" ]]; then
+                info "existing installation: access configuration left untouched (see: sudo drevanta access status)"
+        fi
         if [[ "${DREVANTA_SKIP_CLAIM:-0}" == "1" || "${SKIP_CLAIM:-0}" == "1" ]]; then
                 info "claim-token step skipped (--skip-claim): no token issued or rotated"
                 info "when you are ready to onboard, run: sudo drevanta claim regenerate"
@@ -633,11 +750,15 @@ issue_claim_token() {
         fi
 
         if is_interactive; then
-                print_success_screen "$token" "$target_file"
+                print_success_screen "$token" "$target_file" "${HTTPS_REASON:-}"
         else
                 info "noninteractive install: claim token written to $target_file (mode 0600)"
                 info "retrieve it with: sudo cat $target_file"
-                info "then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding (via SSH tunnel) and paste it"
+                if [[ -n "${HTTPS_HOST:-}" ]]; then
+                        info "then open https://${HTTPS_HOST}/onboarding and paste it"
+                else
+                        info "then open http://127.0.0.1:${TUNNEL_LOCAL_PORT}/onboarding (via SSH tunnel) and paste it"
+                fi
                 info "if the token expires before you use it, get a fresh link with: sudo drevanta claim regenerate"
         fi
 }
@@ -669,6 +790,9 @@ options:
   --token-file PATH   also write the claim token here, mode 0600
   --skip-claim        do not issue, rotate, or deliver any claim token
                       (operator will run: sudo drevanta claim regenerate)
+  --https MODE        public HTTPS on install: auto (default: attempt once
+                      on a FRESH install), yes (force attempt), no (never).
+                      Upgrades never touch access config in auto mode.
   --purge             (with --uninstall) also delete /var/lib/drevanta state
   -h, --help          this help
 EOF
@@ -713,6 +837,7 @@ main() {
                         --ttl)         CLAIM_TTL="${2:?}"; shift 2 ;;
                         --token-file)  token_file="${2:?}"; shift 2 ;;
                         --skip-claim)  SKIP_CLAIM=1; shift ;;
+                        --https)       HTTPS_MODE="${2:?}"; shift 2 ;;
                         *) usage >&2; return 2 ;;
                 esac
         done
@@ -724,6 +849,8 @@ main() {
         fi
 
         CURRENT_RELEASE_BEFORE="$(current_release)"
+        local fresh_install=0
+        [[ -z "$CURRENT_RELEASE_BEFORE" ]] && fresh_install=1
         run_preflight "$bin"
         local version
         version="$(bin_version "$bin")"
@@ -734,7 +861,7 @@ main() {
         write_unit "$version"
         flip_symlink "$version"
         start_and_verify "$version" "$CURRENT_RELEASE_BEFORE"
-        issue_claim_token "$token_file"
+        issue_claim_token "$token_file" "$fresh_install"
         summary "$version"
 }
 
@@ -743,7 +870,11 @@ uninstall() {
         STEP="uninstall"
         log "Stopping and removing the $SERVICE_NAME service"
         systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+        # The public HTTPS proxy shares the release binary: stop it too
+        # (config and certificates are kept for a future re-install).
+        systemctl disable --now drevanta-https.service 2>/dev/null || true
         rm -f "$UNIT_PATH"
+        rm -f "/etc/systemd/system/drevanta-https.service"
         rm -f "$BIN_LINK_DIR/drevanta"
         sys_daemon_reload
         rm -f "$OPT_DIR/current"

@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/auth"
@@ -133,10 +134,28 @@ func (s *server) requireFullSession(next http.HandlerFunc) http.Handler {
 }
 
 // clientKey identifies the rate-limit bucket for a request.
+//
+// Behind the public HTTPS proxy every request arrives from 127.0.0.1, so
+// the raw RemoteAddr would put ALL browser clients into one bucket — a
+// single attacker could lock out every other user. When (and only when)
+// the connection is loopback, the proxy-set X-Forwarded-For value is
+// used instead. The proxy overwrites inbound forwarding headers, so
+// this value is one hop of truth; a local process could still forge it,
+// but that already implies local compromise (same trust level as the
+// SSH-tunnel deployment).
 func clientKey(r *http.Request, kind string) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
+	}
+	if net.ParseIP(host).IsLoopback() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if client, _, perr := net.SplitHostPort(xff); perr == nil && client != "" {
+				host = client // "ip:port" form
+			} else if ip := net.ParseIP(strings.TrimSpace(xff)); ip != nil {
+				host = ip.String()
+			}
+		}
 	}
 	return kind + ":" + host
 }

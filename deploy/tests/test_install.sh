@@ -38,7 +38,9 @@ setup_mocks() {
 
         cat > "$mockdir/systemctl" <<'EOF'
 #!/usr/bin/env bash
-# Mock systemctl: records calls, emulates is-active/restart semantics.
+# Mock systemctl: records calls (both $1 $2 shorthand and full args),
+# emulates is-active/restart semantics.
+echo "$*" >> "${MOCK_SYSTEMCTL_STATE:?}/calls_full"
 case "$1 $2" in
   "daemon-reload "*) echo "daemon-reload" >> "$MOCK_SYSTEMCTL_STATE/calls"; exit 0 ;;
   "enable "*)        echo "enable $2" >> "$MOCK_SYSTEMCTL_STATE/calls"; exit 0 ;;
@@ -134,6 +136,17 @@ export_mock_env() {
         export DREVANTA_BIN_LINK_DIR="$sandbox/bin-link"
         export DREVANTA_SKIP_ROOT_CHECK=1
         export DREVANTA_RUNUSER="$mockdir/runuser"
+        # Public HTTPS access layer (sandboxed):
+        export DREVANTA_HTTPS_MODE="no"          # default: tests opt in explicitly
+        export DREVANTA_HTTPS_WAIT="3"
+        export DREVANTA_ACCESS_CONFIG="$sandbox/https.json"
+        export DREVANTA_HTTPS_STATE_DIR="$sandbox/https-state"
+        export DREVANTA_SYSTEMD_UNIT_DIR="$sandbox/systemd"
+        export DREVANTA_SYSTEMCTL="$mockdir/systemctl"
+        export DREVANTA_ACCESS_FAKE_ROOT=1
+        export DREVANTA_SKIP_USERADD=1
+        export DREVANTA_HTTP_PORT="18081"
+        export DREVANTA_HTTPS_PORT="18443"
         export PATH="$mockdir:/usr/local/bin:/usr/bin:/bin"
 }
 
@@ -227,9 +240,14 @@ test_interactive_success_screen() {
         local rc=$?
         [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_tty.log"; return; }
         grep -q "DREVANTA INSTALLED SUCCESSFULLY" "$sandbox/install_tty.log" && pass "success headline" || fail "no headline"
-        grep -q "Welcome to Drevanta!" "$sandbox/install_tty.log" && pass "welcome copy" || fail "no welcome"
-        grep -qE "ssh -N -L 18080:127\.0\.0\.1:8080 <ssh-user>@<your-vps-ip>" "$sandbox/install_tty.log" \
+        grep -q "Drevanta is running securely." "$sandbox/install_tty.log" && pass "running-securely copy" || fail "no running-securely copy"
+        grep -qE "ssh -L 18080:127\.0\.0\.1:8080 <ssh-user>@<your-vps-ip>" "$sandbox/install_tty.log" \
                 && pass "tunnel command with labelled placeholders (unknown session)" || fail "tunnel line wrong"
+        grep -q "On your computer (NOT inside this VPS shell)" "$sandbox/install_tty.log" \
+                && pass "tunnel command runs on the user's computer, stated" || fail "no on-your-computer wording"
+        grep -q "sudo drevanta access enable-https" "$sandbox/install_tty.log" && pass "HTTPS retry command shown" || fail "no retry command"
+        grep -q "reconnect with the command above or open a second local terminal" "$sandbox/install_tty.log" \
+                && pass "already-connected guidance shown" || fail "no already-connected guidance"
         local link_token
         link_token="$(grep -oE 'http://127\.0\.0\.1:18080/onboarding#token=[A-Za-z0-9_-]+' "$sandbox/install_tty.log" | head -n1 | sed 's/.*#token=//')"
         if [[ "$link_token" =~ ^drv1_[A-Za-z0-9_-]{43}$ ]]; then pass "prefilled onboarding link with full token"; else fail "link token malformed: '$link_token'"; fi
@@ -251,9 +269,114 @@ test_interactive_uses_real_connection_info() {
                 "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_conn.log" 2>&1
         local rc=$?
         [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,40p' "$sandbox/install_conn.log"; return; }
-        grep -q "ssh -N -L 18080:127.0.0.1:8080 root@203.0.113.7" "$sandbox/install_conn.log" \
+        grep -q "ssh -L 18080:127.0.0.1:8080 root@203.0.113.7" "$sandbox/install_conn.log" \
                 && pass "server IP + root taken from the real SSH session" || fail "connection info not used"
         if grep -q "<your-vps-ip>" "$sandbox/install_conn.log"; then fail "placeholder used despite known IP"; else pass "no placeholder when known"; fi
+}
+
+test_https_fresh_install_success() {
+        section "fresh install, HTTPS auto: public HTTPS provisioned, §6 success screen"
+        rm -f "$MOCK_STATUS_FILE"
+        rm -rf "$sandbox/https-state"; mkdir -p "$sandbox/https-state"
+        # A live certificate (secret-free status file the proxy writes).
+        cat > "$sandbox/https-state/status.json" <<'EOF'
+{"phase":"active","host":"23.20.15.8","profile":"shortlived","staging":false,
+ "not_before":"2026-11-01T00:00:00Z","not_after":"2030-01-01T00:00:00Z",
+ "issued_at":"2026-11-01T00:00:00Z","renewals":0,"updated_at":"2026-11-01T00:00:00Z"}
+EOF
+        DREVANTA_INTERACTIVE=1 DREVANTA_HTTPS_MODE=auto \
+                SSH_CONNECTION="198.51.100.9 51000 23.20.15.8 22" \
+                "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_https.log" 2>&1
+        local rc=$?
+        [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,60p' "$sandbox/install_https.log"; return; }
+        grep -q "OPEN DREVANTA IN YOUR BROWSER" "$sandbox/install_https.log" && pass "§6 HTTPS success screen" || fail "no HTTPS success screen"
+        grep -qE "https://23\.20\.15\.8/onboarding\#token=[A-Za-z0-9_-]{44}" "$sandbox/install_https.log" \
+                && pass "setup link uses the public HTTPS address" || fail "HTTPS setup link wrong"
+        grep -q "No domain required." "$sandbox/install_https.log" && pass "no-domain-required copy" || fail "no no-domain copy"
+        grep -q "HTTPS enabled · Certificate valid" "$sandbox/install_https.log" && pass "secure access summary" || fail "no secure access summary"
+        grep -q '"host": "23.20.15.8"' "$sandbox/https.json" && pass "access config written" || fail "config missing/wrong host"
+        grep -q "enable --now drevanta-https.service" "$sandbox/calls_full" && pass "proxy unit enabled via systemd" || fail "unit not enabled"
+        [[ -f "$sandbox/systemd/drevanta-https.service" ]] && pass "hardened proxy unit written" || fail "proxy unit missing"
+        grep -q "User=drevanta-https" "$sandbox/systemd/drevanta-https.service" && pass "proxy unit runs unprivileged" || fail "proxy unit user wrong"
+        # The claim CLI (unprivileged user context) must ALSO pick the https link.
+        local claim_link
+        claim_link="$("$sandbox/opt/current/drevantad" claim regenerate --data-dir "$sandbox/state" 2>&1 >/dev/null | grep -oE 'https://23\.20\.15\.8/onboarding#token=[A-Za-z0-9_-]+' | head -n1)"
+        [[ -n "$claim_link" ]] && pass "claim screen switches to the HTTPS link when live" || fail "claim screen still tunnel-only"
+}
+
+test_https_upgrade_leaves_config() {
+        section "upgrade with existing config: access configuration untouched"
+        local before after
+        before="$(cat "$sandbox/https.json")"
+        DREVANTA_INTERACTIVE=0 DREVANTA_TOKEN_FILE="$sandbox/state/claim-upgrade.txt" \
+                "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" \
+                >"$sandbox/install_upgrade_access.log" 2>&1 && pass "upgrade exit 0" || { fail "upgrade exit $?"; sed -n '1,50p' "$sandbox/install_upgrade_access.log"; }
+        grep -q "access configuration left untouched" "$sandbox/install_upgrade_access.log" \
+                && pass "explicitly reported untouched" || fail "no untouched message"
+        after="$(cat "$sandbox/https.json")"
+        [[ "$before" == "$after" ]] && pass "config byte-identical after upgrade" || fail "config changed on upgrade"
+        if grep -q "PUBLIC HTTPS IS LIVE" "$sandbox/install_upgrade_access.log"; then fail "HTTPS attempted on upgrade"; else pass "no HTTPS attempt on upgrade"; fi
+}
+
+test_https_force_failure_fallback() {
+        section "HTTPS attempt fails: honest fallback screen, no public HTTP"
+        cat > "$mockdir/systemctl-fail" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "enable --now drevanta-https.service" ]]; then
+        echo "mock: enable failed" >&2; exit 1
+fi
+exit 0
+EOF
+        chmod +x "$mockdir/systemctl-fail"
+        # Reset any state from earlier HTTPS tests so this attempt genuinely
+        # goes through the failure path.
+        rm -rf "$sandbox/https-state"; mkdir -p "$sandbox/https-state"
+        DREVANTA_INTERACTIVE=1 DREVANTA_HTTPS_MODE=yes DREVANTA_SYSTEMCTL="$mockdir/systemctl-fail" \
+                "$DEPLOY/install.sh" install --binary "$sandbox/staged-drevantad" >"$sandbox/install_httpsfail.log" 2>&1 \
+                && pass "installer still exits 0 (non-fatal)" || fail "installer exit $?"
+        grep -q "Direct HTTPS could not be configured:" "$sandbox/install_httpsfail.log" && pass "failure reason shown" || fail "no failure reason"
+        grep -q "starting drevanta-https.service failed" "$sandbox/install_httpsfail.log" && pass "precise reason propagated" || fail "reason not propagated"
+        grep -q "sudo drevanta access enable-https" "$sandbox/install_httpsfail.log" && pass "retry command shown" || fail "no retry command"
+        if grep -q "OPEN DREVANTA IN YOUR BROWSER" "$sandbox/install_httpsfail.log"; then fail "success screen shown on failure"; else pass "no success screen on failure"; fi
+        if grep -qE "https://[0-9a-zA-Z.]+/onboarding" "$sandbox/install_httpsfail.log"; then fail "public HTTPS link shown despite failure"; else pass "no public HTTPS link offered"; fi
+        if grep "http://" "$sandbox/install_httpsfail.log" | grep -qv "127.0.0.1"; then fail "public HTTP URL offered"; else pass "no public HTTP fallback (loopback only)"; fi
+        rm -f "$mockdir/systemctl-fail"
+}
+
+test_access_cli_status_and_disable() {
+        section "access CLI: status report and disable semantics"
+        local bin="$sandbox/opt/current/drevantad" out
+        out="$(SSH_CONNECTION="198.51.100.9 51000 23.20.15.8 22" "$bin" access status 2>/dev/null)"
+        grep -q "ACCESS MODE" <<<"$out" && pass "status renders" || fail "status broken"
+        grep -q "SSH-TUNNEL FALLBACK" <<<"$out" && pass "status shows tunnel fallback" || fail "no tunnel fallback"
+        grep -q "this session:  server address 23.20.15.8" <<<"$out" \
+                && pass "status reports the session's server address" || fail "session address not reported"
+        "$bin" access disable-https >/dev/null 2>&1 && pass "disable-https exits 0" || fail "disable failed"
+        grep -q "disable --now drevanta-https.service" "$sandbox/calls_full" && pass "unit disabled via systemd" || fail "unit not disabled"
+        grep -q '"enabled": false' "$sandbox/https.json" && pass "config marked disabled (kept for re-enable)" || fail "config not disabled"
+        out="$($bin access status 2>/dev/null)"
+        grep -q "public HTTPS:  disabled" <<<"$out" && pass "status reflects disabled" || fail "status stale"
+        # Data-preservation promise: disabling must not touch the daemon or state.
+        [[ -d "$sandbox/state" ]] && pass "backend state untouched by disable" || fail "state wiped"
+        # enable-https after disable re-uses the config and re-enables.
+        # (Pre-write a live status as the running proxy would provide.)
+        cat > "$sandbox/https-state/status.json" <<'EOF'
+{"phase":"active","host":"23.20.15.8","profile":"shortlived","staging":false,
+ "not_before":"2026-11-01T00:00:00Z","not_after":"2030-01-01T00:00:00Z",
+ "issued_at":"2026-11-01T00:00:00Z","renewals":1,"updated_at":"2026-11-01T00:00:00Z"}
+EOF
+        DREVANTA_HTTPS_MODE=no SSH_CONNECTION="198.51.100.9 51000 23.20.15.8 22" \
+                "$bin" access enable-https >/dev/null 2>&1 && pass "re-enable exits 0" || fail "re-enable failed"
+        grep -q '"host": "23.20.15.8"' "$sandbox/https.json" && pass "re-enable kept target host" || fail "host lost"
+}
+
+test_wrapper_access() {
+        section "drevanta front-end: access passthrough"
+        local wrapper="$sandbox/bin-link/drevanta" out
+        [[ -x "$wrapper" ]] || { fail "front-end not installed"; return; }
+        out="$("$wrapper" access status 2>/dev/null)"
+        grep -q "ACCESS MODE" <<<"$out" && pass "drevanta access status works" || fail "wrapper access broken"
+        "$wrapper" help 2>/dev/null | grep -q "access enable-https" && pass "wrapper help lists access" || fail "help missing access"
 }
 
 test_noninteractive_default_token_file() {
@@ -568,9 +691,10 @@ test_docs_match_cli() {
 
         # Commands documented in the guide must be real: cross-check against
         # the binary's own usage output.
-        local cli_help claim_help
+        local cli_help claim_help access_help
         cli_help="$("$bin" help 2>&1 || true)"
         claim_help="$("$bin" claim 2>&1 || true)"
+        access_help="$("$bin" access --help 2>&1 || true)"
         local frag
         for frag in "claim regenerate" "claim status" "claim revoke"; do
                 if grep -qF "$frag" "$doc" && ! printf '%s\n%s' "$cli_help" "$claim_help" | grep -qF "$frag"; then
@@ -579,8 +703,15 @@ test_docs_match_cli() {
                         pass "doc command '$frag' exists in the CLI"
                 fi
         done
+        for frag in "access status" "access enable-https" "access disable-https" "access configure"; do
+                if grep -qF "$frag" "$doc" && ! printf '%s' "$access_help" | grep -qF "${frag#access }"; then
+                        fail "docs reference '$frag' but the access CLI does not list it"
+                else
+                        pass "doc command '$frag' exists in the CLI"
+                fi
+        done
         # The guide must teach the real, locked tunnel + link format.
-        for frag in "ssh -N -L 18080:127.0.0.1:8080" "/onboarding#token=" "Token expires"; do
+        for frag in "ssh -L 18080:127.0.0.1:8080" "/onboarding#token=" "Token expires" "sudo drevanta claim regenerate"; do
                 grep -qF "$frag" "$doc" && pass "guide states: $frag" || fail "guide missing: $frag"
         done
         # README must link the guide prominently.
@@ -705,15 +836,20 @@ main() {
         test_preflight_pass
         test_preflight_fail_arch
         test_preflight_fail_port
+        test_https_fresh_install_success
         test_install_fresh_and_claim
+        test_https_upgrade_leaves_config
+        test_https_force_failure_fallback
         test_interactive_success_screen
         test_interactive_uses_real_connection_info
         test_noninteractive_default_token_file
         test_no_reissue_when_token_active
         test_claim_init_cli_screen
         test_wrapper_frontend
+        test_wrapper_access
         test_skip_claim
         test_docs_match_cli
+        test_access_cli_status_and_disable
         test_install_idempotent
         test_install_upgrade_and_autorollback
         test_rollback_script

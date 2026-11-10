@@ -10,16 +10,20 @@
 #       sudo drevanta claim regenerate      fresh one-time setup link
 #       sudo drevanta claim status          onboarding state (no secrets)
 #       sudo drevanta claim revoke          invalidate the current token
+#       sudo drevanta access status         public HTTPS + tunnel access state
+#       sudo drevanta access enable-https   opt in to public HTTPS
+#       sudo drevanta access disable-https  return to tunnel-only
 #       drevanta version                    show the running release
 #
 # What it guarantees:
 #   * The daemon itself is NOT touchable through this front-end: `serve`
 #     is managed exclusively by systemd (systemctl restart drevanta).
-#   * State-changing commands run as the unprivileged `drevanta` service
-#     user (via runuser), never as root — same privilege boundary as the
-#     daemon itself.
-#   * It adds no network surface, writes nothing, and leaks nothing:
-#     tokens are printed only by the claim subcommands to the caller's
+#   * `claim` commands run as the unprivileged `drevanta` service user
+#     (via runuser) — same privilege boundary as the daemon itself.
+#   * `access` commands run as root: they configure the separate public
+#     HTTPS proxy unit (drevanta-https) and never read the database,
+#     never see claim tokens, and never touch the firewall or SSH.
+#   * Tokens are printed only by the claim subcommands to the caller's
 #     own terminal, exactly once.
 #
 # Environment overrides (used by the installer test harness):
@@ -44,6 +48,10 @@ usage: drevanta <command>
                       administrator exists.
   claim status        show onboarding state (no secrets)
   claim revoke        invalidate the current claim token
+  access status       show public HTTPS / SSH-tunnel access state
+  access enable-https opt in to publicly trusted HTTPS on this VPS
+  access disable-https turn public HTTPS off (backend and data unaffected)
+  access configure    adjust HTTPS target host / ACME settings
   version             show the installed release
 
 The daemon itself is managed by systemd:  systemctl status drevanta
@@ -71,6 +79,21 @@ case "$1" in
                 exec "$DAEMON" version
                 ;;
 esac
+
+# `access` manages the separate public HTTPS proxy unit (systemd, /etc
+# config) and therefore runs as root. It shares none of the claim data:
+# no database access, no tokens.
+if [ "$1" = "access" ]; then
+        if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
+                echo "drevanta: must run as root (try: sudo drevanta access ...)" >&2
+                exit 2
+        fi
+        if [ ! -x "$DAEMON" ]; then
+                echo "drevanta: daemon not found at $DAEMON — is Drevanta installed?" >&2
+                exit 1
+        fi
+        exec "$DAEMON" "$@"
+fi
 
 # Everything past this point touches the state directory and therefore
 # runs as the unprivileged service user — root is required to get there.

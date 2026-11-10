@@ -1,0 +1,59 @@
+# drevanta-https.service — reference copy of the unit the access CLI
+# generates (authoritative source: cmd/drevantad/access.go,
+# httpsUnitContent; installed by `sudo drevanta access enable-https`).
+#
+# This unit fronts the loopback-only drevanta daemon with a publicly
+# trusted TLS endpoint (ACME via the embedded lego client). It is a
+# SEPARATE unprivileged process: binding ports 80/443 needs exactly one
+# capability (CAP_NET_BIND_SERVICE); the daemon keeps running loopback-
+# only and public HTTPS is always opt-in.
+
+[Unit]
+Description=Drevanta public HTTPS proxy (ACME + reverse proxy)
+Documentation=https://github.com/backupamunga-ops/drevanta_server_manager
+After=network-online.target drevanta.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drevanta-https
+Group=drevanta-https
+ExecStart=/opt/drevanta/current/drevantad https-serve --config /etc/drevanta/https.json --state-dir /var/lib/drevanta-https
+Restart=on-failure
+RestartSec=10s
+
+# --- Resource limits ---
+MemoryMax=128M
+MemoryHigh=96M
+TasksMax=32
+LimitNOFILE=4096
+
+# --- Port binding: the ONLY capability it needs ---
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# --- Filesystem isolation ---
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+StateDirectory=drevanta-https
+ProtectProc=invisible
+
+# --- Kernel surface ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

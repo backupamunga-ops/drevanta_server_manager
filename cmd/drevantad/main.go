@@ -2,15 +2,20 @@
 //
 // Subcommands:
 //
-//	drevantad serve                 run the HTTP daemon (default when no subcommand)
+//	drevantad serve                 run the loopback HTTP daemon (default when no subcommand)
 //	drevantad claim init            create/rotate the first-owner claim token (prints it ONCE)
 //	drevantad claim regenerate      friendly alias: re-issue the claim token (prints it ONCE)
 //	drevantad claim status          show claim token / onboarding state (no secrets)
 //	drevantad claim revoke          revoke the active claim token
+//	drevantad access status|enable-https|disable-https|configure
+//	                                public HTTPS access (root; manages the separate
+//	                                drevanta-https proxy unit and its config)
+//	drevantad https-serve           run the public HTTPS proxy worker (systemd only)
 //	drevantad version               print the version
 //
 // Design invariants:
-//   - Loopback-only by default: the only network surface is 127.0.0.1.
+//   - Loopback-only by default: the daemon's only network surface is 127.0.0.1.
+//     Public HTTPS is a separate process (drevanta-https) that proxies to it.
 //   - Runs unprivileged: no capabilities, no root, no Docker/Nginx helpers.
 //   - Metrics are collected on demand from /proc; there is no background
 //     sampling loop.
@@ -28,11 +33,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpsd"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
 )
 
 // version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.3.5-onboard-ui"
+var version = "0.4.0-access"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
@@ -53,6 +59,10 @@ func main() {
 			os.Exit(cmdServe(os.Args[2:]))
 		case "claim":
 			os.Exit(cmdClaim(os.Args[2:], os.Stdout, os.Stderr))
+		case "access":
+			os.Exit(cmdAccess(os.Args[2:], os.Stdout, os.Stderr))
+		case "https-serve":
+			os.Exit(cmdHTTPServe(os.Args[2:]))
 		case "version", "--version":
 			fmt.Println(version)
 			os.Exit(0)
@@ -88,13 +98,16 @@ flags:
   --port PORT      daemon loopback port shown in the tunnel hint (default 8080)
 `)
 	default:
-		fmt.Fprint(os.Stderr, `usage: drevantad [serve|claim|version] [flags]
+		fmt.Fprint(os.Stderr, `usage: drevantad [serve|claim|access|https-serve|version] [flags]
 
-  serve                run the HTTP daemon (default)
+  serve                run the loopback HTTP daemon (default)
   claim init           issue the first-owner claim token and show the setup link
   claim regenerate     re-issue the claim token (lost/expired link fallback)
   claim status         show onboarding state (no secrets)
   claim revoke         revoke the active claim token
+  access status|enable-https|disable-https|configure
+                       public HTTPS access (root; see: drevanta access --help)
+  https-serve          run the public HTTPS proxy worker (used by systemd)
   version              print the version
 `)
 	}
@@ -257,9 +270,10 @@ func humanTTL(d time.Duration) string {
 }
 
 // printClaimSetupScreen writes the locked first-time-setup instructions
-// (tunnel command, one-time setup link, raw fallback token) to w. verb
-// selects the headline wording: "init" for the installer's first token,
-// "regenerate" for the operator-issued replacement. It is only ever
+// to w. verb selects the headline wording: "init" for the installer's
+// first token, "regenerate" for the operator-issued replacement. When
+// public HTTPS is live the setup link uses https://<host>/ directly; it
+// falls back to the SSH-tunnel link otherwise. The token is only ever
 // printed to the operator's own terminal (stderr of the claim command),
 // never logged or persisted.
 func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonPort, verb string) {
@@ -270,11 +284,20 @@ func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonP
 	if user == "" {
 		user = "<ssh-user>"
 	}
-	link := fmt.Sprintf("http://127.0.0.1:%s/onboarding#token=%s", setupLinkPort, token)
+
 	headline := "✓ CLAIM TOKEN ISSUED"
 	if verb == "regenerate" {
 		headline = "✓ NEW CLAIM TOKEN ISSUED"
 	}
+
+	accessMode, httpsHost := httpsAccessState()
+	var link string
+	if accessMode == "https" {
+		link = fmt.Sprintf("https://%s/onboarding#token=%s", httpsHost, token)
+	} else {
+		link = fmt.Sprintf("http://127.0.0.1:%s/onboarding#token=%s", setupLinkPort, token)
+	}
+
 	fmt.Fprintf(w, `
 %s
 
@@ -282,14 +305,29 @@ func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonP
 
   Drevanta first-time setup
 
-  STEP 1 — On your computer, run:
+  STEP 1 — Open this link in your browser:
+
+    %s
+`, headline, link)
+
+	if accessMode == "https" {
+		fmt.Fprintf(w, `
+  (If the link does not open, use the private SSH-tunnel fallback:
+    ssh -L %s:127.0.0.1:%s %s@%s
+   then open http://127.0.0.1:%s/onboarding#token=%s )
+`, setupLinkPort, daemonPort, user, ip, setupLinkPort, token)
+	} else {
+		fmt.Fprintf(w, `
+  STEP 2 — If the link does not open, first run this ON YOUR
+           COMPUTER (not on the server) and keep it connected:
 
     ssh -N -L %s:127.0.0.1:%s %s@%s
 
-  STEP 2 — Open this link:
+  then open the link again.
+`, setupLinkPort, daemonPort, user, ip)
+	}
 
-    %s
-
+	fmt.Fprintf(w, `
   Token expires in %s.
   This link can be used only once.
 
@@ -298,11 +336,28 @@ func printClaimSetupScreen(w io.Writer, token string, ttl time.Duration, daemonP
   Raw token (fallback): %s
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`, headline, setupLinkPort, daemonPort, user, ip, link, humanTTL(ttl), token)
+`, humanTTL(ttl), token)
 	if verb == "regenerate" {
 		fmt.Fprintln(w, "  The previous claim token (if any) is now invalid.")
 	}
-	if !known {
+	if !known && accessMode != "https" {
 		fmt.Fprintln(w, "  (replace the placeholder with this server's address and your SSH user)")
 	}
+}
+
+// httpsAccessState reports the current public-HTTPS state from the
+// access configuration and the proxy status file. Returns "https" and
+// the target host when a valid certificate is being served, "tunnel"
+// otherwise. Both files are secret-free; unreadable files mean tunnel.
+func httpsAccessState() (mode, host string) {
+	p := httpsd.RuntimePathsFromEnv()
+	cfg, err := httpsd.LoadRuntimeConfig(p)
+	if err != nil || !cfg.Enabled || cfg.Host == "" {
+		return "tunnel", ""
+	}
+	st, err := httpsd.ReadStatus(p.StateDir)
+	if err != nil || !st.CertValid(time.Now()) {
+		return "tunnel", ""
+	}
+	return "https", cfg.Host
 }

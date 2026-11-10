@@ -43,7 +43,7 @@ var usernameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 // Helpers
 // ---------------------------------------------------------------------------
 
-func setSessionCookie(w http.ResponseWriter, token string) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -51,10 +51,15 @@ func setSessionCookie(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionSliding.Seconds()),
+		// Secure when the request arrived over TLS or through the trusted
+		// public HTTPS proxy (the only peer that can set X-Forwarded-Proto
+		// on the loopback listener in practice). The SSH-tunnel path stays
+		// non-Secure so it keeps working unchanged.
+		Secure: requestIsHTTPS(r),
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
@@ -62,7 +67,20 @@ func clearSessionCookie(w http.ResponseWriter) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
+		Secure:   requestIsHTTPS(r),
 	})
+}
+
+// requestIsHTTPS decides whether the browser-side scheme is https. The
+// trusted-proxy boundary lives in the httpsd proxy: it strips every
+// client-supplied forwarding header and sets X-Forwarded-Proto itself.
+// Direct loopback connections without the header keep the tunnel
+// behaviour (non-Secure cookies over http://127.0.0.1).
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
 func validUsername(u string) bool {
@@ -82,7 +100,7 @@ func (s *server) newSession(w http.ResponseWriter, r *http.Request, userID int64
 	if _, err := s.st.CreateSession(r.Context(), hash, userID, scope, sessionSliding, sessionAbsolute); err != nil {
 		return err
 	}
-	setSessionCookie(w, token)
+	setSessionCookie(w, r, token)
 	return nil
 }
 
@@ -484,7 +502,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 		audit(r.Context(), s.st, sess.username, "logout", "auth", nil)
 	}
-	clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
