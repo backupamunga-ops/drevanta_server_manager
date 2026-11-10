@@ -1,9 +1,10 @@
-# drevanta.service — dedicated unprivileged systemd service for drevantad.
-# Installed to /etc/systemd/system/drevanta.service.
+# drevanta.service — reference copy of the unit the installer generates.
+# The authoritative source is deploy/install.sh (unit_content); install
+# via `install.sh` so the release/current layout and port are consistent.
 #
-# Hardening posture (Sprint 1): no capabilities, read-only filesystems
-# except the state directory, no new privileges, no /tmp sharing, no
-# device access, filtered syscall surface, 256 MiB memory ceiling.
+# Hardening posture: no capabilities, read-only filesystems except the
+# state directory, no new privileges, no /tmp sharing, no device access,
+# filtered syscall surface, 256 MiB memory ceiling.
 
 [Unit]
 Description=Drevanta server management daemon
@@ -15,7 +16,7 @@ Wants=network-online.target
 Type=simple
 User=drevanta
 Group=drevanta
-ExecStart=/opt/drevanta/drevantad --addr 127.0.0.1:8080 --data-dir /var/lib/drevanta
+ExecStart=/opt/drevanta/current/drevantad serve --addr 127.0.0.1:8080 --data-dir /var/lib/drevanta
 Restart=on-failure
 RestartSec=3s
 

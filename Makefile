@@ -35,3 +35,12 @@ cross-linux-amd64:
 
 clean:
 	rm -rf bin dist
+
+## installer-test: run the deploy script test harness against a fresh build
+installer-test:
+	$(GO) build -o /tmp/drevantad-installer-test ./cmd/drevantad
+	bash deploy/tests/test_install.sh /tmp/drevantad-installer-test
+
+## shellcheck: lint the deploy scripts (requires shellcheck)
+shellcheck:
+	shellcheck deploy/install.sh deploy/rollback.sh deploy/healthgate.sh deploy/tests/test_install.sh

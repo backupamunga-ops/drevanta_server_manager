@@ -6,10 +6,13 @@ for small (512 MB-class) VPS instances and follows a **private-first**
 security model: nothing is exposed to the public internet — the daemon
 binds to loopback only and is reached through an SSH tunnel.
 
-**Status:** Sprint 1 — walking skeleton. The daemon, its frozen API, the
-embedded dashboard, the SQLite audit store, the hardened systemd service,
-CI, and a manual deployment to the development VPS are complete. The
-installer/onboarding product (Phase 1) is not started.
+**Status:** Sprint 2 — secure installer + first-owner onboarding. A host
+is set up with one verified command; the first person to present the
+single-use claim token becomes the administrator through a browser
+wizard (credentials, TOTP MFA with recovery codes, or an explicit,
+audited MFA skip). Sprint 1's daemon, API, dashboard, SQLite audit store,
+hardened systemd service, CI, and deployment are unchanged in spirit and
+preserved.
 
 ## Security model (Sprint 1)
 
@@ -37,7 +40,22 @@ make vet        # gofmt + go vet
 make run        # dev run: 127.0.0.1:8080, state in /tmp/drevanta-dev
 ```
 
-Then open `http://127.0.0.1:8080/`.
+Then open `http://127.0.0.1:8080/` — a fresh instance redirects you to
+the onboarding wizard. Run `bin/drevantad claim init --data-dir
+/tmp/drevanta-dev` once to get a claim token (printed once).
+
+## Install on a server (one command)
+
+```sh
+make cross-linux-amd64                 # dist/drevantad-linux-amd64
+sudo deploy/install.sh                 # preflight + install + start + verify
+sudo deploy/install.sh preflight       # checks only, changes nothing
+```
+
+The installer prints a masked, single-use, expiring claim token and can
+also store it root-only (`--token-file`); full details and the rollback
+drill are in `deploy/DEPLOY.md`. Re-running the installer is always safe
+(idempotent; upgrades roll back automatically if `/readyz` fails).
 
 ## Accessing the deployed dev instance
 

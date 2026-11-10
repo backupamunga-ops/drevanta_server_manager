@@ -21,15 +21,80 @@ var migrations = []migration{
 		name:    "initial_audit_schema",
 		up: `
 CREATE TABLE IF NOT EXISTS audit_events (
-	id     INTEGER PRIMARY KEY AUTOINCREMENT,
-	ts     TEXT NOT NULL,              -- RFC3339Nano, UTC
-	actor  TEXT NOT NULL,              -- who/what produced the event
-	action TEXT NOT NULL,              -- machine-readable event name
-	target TEXT NOT NULL DEFAULT '',  -- object the event applies to
-	detail TEXT NOT NULL DEFAULT '{}' -- free-form JSON payload
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts     TEXT NOT NULL,              -- RFC3339Nano, UTC
+        actor  TEXT NOT NULL,              -- who/what produced the event
+        action TEXT NOT NULL,              -- machine-readable event name
+        target TEXT NOT NULL DEFAULT '',  -- object the event applies to
+        detail TEXT NOT NULL DEFAULT '{}' -- free-form JSON payload
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_ts     ON audit_events (ts);
 CREATE INDEX IF NOT EXISTS idx_audit_events_action ON audit_events (action);
+`,
+	},
+	{
+		version: 2,
+		name:    "identity_onboarding_schema",
+		up: `
+-- Operator identity (Sprint 2 onboarding). Exactly one administrator is
+-- created by the first-owner claim flow in this sprint.
+CREATE TABLE IF NOT EXISTS users (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        username      TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,          -- argon2id PHC string
+        mfa_secret    TEXT NOT NULL DEFAULT '', -- base32 TOTP secret, empty until setup
+        mfa_enabled   INTEGER NOT NULL DEFAULT 0,
+        mfa_last_step INTEGER NOT NULL DEFAULT -1, -- replay guard: last accepted step
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+);
+
+-- Singleton row (id = 1) tracking the first-owner onboarding state machine:
+--   unclaimed -> mfa_pending -> active
+CREATE TABLE IF NOT EXISTS instance_state (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        status         TEXT NOT NULL DEFAULT 'unclaimed',
+        admin_user_id  INTEGER REFERENCES users(id),
+        mfa_mode       TEXT NOT NULL DEFAULT '', -- 'totp' | 'skipped' | ''
+        claimed_at     TEXT NOT NULL DEFAULT '',
+        mfa_decided_at TEXT NOT NULL DEFAULT '',
+        updated_at     TEXT NOT NULL
+);
+
+-- First-owner claim tokens: only the SHA-256 hash is ever stored.
+-- A token is single-use: consumed_at / revoked_at are set on first use
+-- or explicit revocation; expired tokens are never accepted.
+CREATE TABLE IF NOT EXISTS claim_tokens (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash  TEXT NOT NULL UNIQUE,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        consumed_at TEXT NOT NULL DEFAULT '',
+        revoked_at  TEXT NOT NULL DEFAULT ''
+);
+
+-- Browser sessions. Only the SHA-256 hash of the cookie value is stored.
+-- expires_at slides on activity; absolute_at is the hard lifetime cap.
+CREATE TABLE IF NOT EXISTS sessions (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash   TEXT NOT NULL UNIQUE,
+        user_id      INTEGER NOT NULL REFERENCES users(id),
+        scope        TEXT NOT NULL,          -- 'onboarding' | 'full'
+        created_at   TEXT NOT NULL,
+        absolute_at  TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
+
+-- Single-use MFA recovery codes (hashed; shown to the operator once).
+CREATE TABLE IF NOT EXISTS recovery_codes (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id   INTEGER NOT NULL REFERENCES users(id),
+        code_hash TEXT NOT NULL,
+        used_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON recovery_codes (user_id);
 `,
 	},
 }
@@ -44,9 +109,9 @@ func latestVersion() int {
 func (s *Store) Migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
-	version    INTEGER PRIMARY KEY,
-	name       TEXT NOT NULL,
-	applied_at TEXT NOT NULL
+        version    INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL,
+        applied_at TEXT NOT NULL
 )`)
 	if err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)

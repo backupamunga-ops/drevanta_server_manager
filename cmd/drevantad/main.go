@@ -1,126 +1,175 @@
 // drevantad is the Drevanta server management daemon.
 //
-// Sprint 1 walking skeleton: a hardened, unprivileged HTTP daemon that
-// exposes a frozen API surface (GET /healthz, GET /readyz,
-// GET /api/v1/server/metrics) plus the embedded SvelteKit dashboard, and
-// records lifecycle events into a local SQLite audit log.
+// Subcommands:
+//
+//	drevantad serve              run the HTTP daemon (default when no subcommand)
+//	drevantad claim init         create/rotate the first-owner claim token (prints it ONCE)
+//	drevantad claim status       show claim token / onboarding state (no secrets)
+//	drevantad claim revoke       revoke the active claim token
+//	drevantad version            print the version
 //
 // Design invariants:
 //   - Loopback-only by default: the only network surface is 127.0.0.1.
 //   - Runs unprivileged: no capabilities, no root, no Docker/Nginx helpers.
 //   - Metrics are collected on demand from /proc; there is no background
 //     sampling loop.
+//   - Claim tokens and session cookies exist only as SHA-256 hashes in
+//     the database; plaintext tokens are printed exactly once.
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
-
-	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpapi"
-	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
 )
 
 // version is stamped via -ldflags "-X main.version=..." in release builds.
-var version = "0.1.0-sprint1"
+var version = "0.2.2-sprint2"
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:8080", "listen address (loopback only by design)")
-	dataDir := flag.String("data-dir", "/var/lib/drevanta", "state directory holding the SQLite database")
-	flag.Parse()
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "serve":
+			os.Exit(cmdServe(os.Args[2:]))
+		case "claim":
+			os.Exit(cmdClaim(os.Args[2:]))
+		case "version", "--version":
+			fmt.Println(version)
+			os.Exit(0)
+		case "help", "--help", "-h":
+			usage("")
+			os.Exit(0)
+		}
+	}
+	// Sprint 1 compatibility: bare invocation (flags only) means serve.
+	os.Exit(cmdServe(os.Args[1:]))
+}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	slog.SetDefault(logger)
+func usage(topic string) {
+	switch topic {
+	case "claim":
+		fmt.Fprint(os.Stderr, `usage: drevantad claim <init|status|revoke> [flags]
 
-	if err := run(*addr, *dataDir); err != nil {
-		slog.Error("drevantad: fatal", "err", err)
-		os.Exit(1)
+  init     create a new first-owner claim token (revokes any previous
+           unconsumed token) and print it once. Only allowed while the
+           instance is unclaimed.
+  status   print the onboarding state and whether an active, unexpired
+           claim token exists (no secrets).
+  revoke   revoke the active claim token.
+
+flags:
+  --data-dir DIR   state directory holding drevanta.db (default /var/lib/drevanta)
+  --ttl DURATION   claim token time-to-live for init (default 24h)
+`)
+	default:
+		fmt.Fprint(os.Stderr, `usage: drevantad [serve|claim|version] [flags]
+
+  serve           run the HTTP daemon (default)
+  claim init      issue the first-owner claim token (printed once)
+  claim status    show onboarding state (no secrets)
+  claim revoke    revoke the active claim token
+  version         print the version
+`)
 	}
 }
 
-func run(addr, dataDir string) error {
-	if err := os.MkdirAll(dataDir, 0o750); err != nil {
-		return fmt.Errorf("create data dir %s: %w", dataDir, err)
+func cmdServe(args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address (loopback only by design)")
+	dataDir := fs.String("data-dir", "/var/lib/drevanta", "state directory holding the SQLite database")
+	if err := fs.Parse(args); err != nil {
+		usage("")
+		return 2
 	}
+	if err := run(*addr, *dataDir); err != nil {
+		slogError("drevantad: fatal", err)
+		return 1
+	}
+	return 0
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	st, err := store.Open(dataDir)
+func cmdClaim(args []string) int {
+	if len(args) == 0 {
+		usage("claim")
+		return 2
+	}
+	fs := flag.NewFlagSet("claim "+args[0], flag.ContinueOnError)
+	dataDir := fs.String("data-dir", "/var/lib/drevanta", "state directory holding the SQLite database")
+	ttl := fs.Duration("ttl", 24*time.Hour, "claim token TTL for init")
+	if err := fs.Parse(args[1:]); err != nil {
+		usage("claim")
+		return 2
+	}
+	ctx := context.Background()
+	st, err := openStore(*dataDir)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		slogError("drevantad claim: open store", err)
+		return 1
 	}
 	defer st.Close()
-
 	if err := st.Migrate(ctx); err != nil {
-		return fmt.Errorf("migrate store: %w", err)
+		slogError("drevantad claim: migrate", err)
+		return 1
 	}
 
-	// Lifecycle events go to the audit log. The startup write uses a
-	// detached context so it cannot be dropped by shutdown cancellation.
-	_ = st.Audit(context.WithoutCancel(ctx), "drevantad", "daemon_started", "daemon", map[string]any{
-		"version":  version,
-		"pid":      os.Getpid(),
-		"addr":     addr,
-		"data_dir": dataDir,
-	})
-	defer func() {
-		_ = st.Audit(context.Background(), "drevantad", "daemon_stopped", "daemon", map[string]any{"version": version})
-	}()
-
-	diskPaths := dedupe([]string{"/", dataDir})
-	mux := httpapi.New(st, version, diskPaths)
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      20 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- srv.ListenAndServe()
-	}()
-
-	slog.Info("drevantad listening", "addr", addr, "version", version, "data_dir", dataDir)
-
-	select {
-	case <-ctx.Done():
-		slog.Info("drevantad shutting down")
-	case err := <-serveErr:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("http server: %w", err)
+	switch args[0] {
+	case "init":
+		state, err := st.InstanceState(ctx)
+		if err != nil {
+			slogError("drevantad claim: state", err)
+			return 1
 		}
-		return nil
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("graceful shutdown: %w", err)
-	}
-	return nil
-}
-
-func dedupe(paths []string) []string {
-	seen := make(map[string]bool, len(paths))
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if p == "" || seen[p] {
-			continue
+		if state.Status != "unclaimed" {
+			fmt.Fprintln(os.Stderr, "instance is already claimed; no claim token is issued")
+			return 1
 		}
-		seen[p] = true
-		out = append(out, p)
+		token, hash, err := newToken()
+		if err != nil {
+			slogError("drevantad claim: generate", err)
+			return 1
+		}
+		ct, err := st.CreateClaimToken(ctx, hash, *ttl)
+		if err != nil {
+			slogError("drevantad claim: store", err)
+			return 1
+		}
+		auditEvent(ctx, st, "drevantad", "claim_token_created", "claim",
+			map[string]any{"ttl_hours": ttl.Hours(), "expires_at": ct.ExpiresAt.Format(time.RFC3339)})
+		// The plaintext token is printed exactly once, to stdout, and is
+		// never stored or logged anywhere.
+		fmt.Println(token)
+		fmt.Fprintf(os.Stderr, "claim token valid until %s (ttl %s)\n", ct.ExpiresAt.Format(time.RFC3339), *ttl)
+		return 0
+	case "status":
+		state, err := st.InstanceState(ctx)
+		if err != nil {
+			slogError("drevantad claim: state", err)
+			return 1
+		}
+		tokenActive := false
+		if ct, err := st.ActiveClaimToken(ctx); err == nil && ct.ExpiresAt.After(time.Now()) {
+			tokenActive = true
+		}
+		fmt.Printf("instance_status=%s mfa_mode=%q claim_token_active=%t\n",
+			state.Status, state.MFAMode, tokenActive)
+		return 0
+	case "revoke":
+		ct, err := st.ActiveClaimToken(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "no active claim token")
+			return 1
+		}
+		if err := st.RevokeClaimToken(ctx, ct.ID); err != nil {
+			slogError("drevantad claim: revoke", err)
+			return 1
+		}
+		auditEvent(ctx, st, "drevantad", "claim_token_revoked", "claim", nil)
+		fmt.Println("claim token revoked")
+		return 0
+	default:
+		usage("claim")
+		return 2
 	}
-	return out
 }

@@ -69,3 +69,93 @@ headroom for the OS, the audit growth, and later components.
 - Planned follow-up per the testing strategy: continuous soak under a
   cgroup `MemoryMax=512M, MemorySwapMax=0` harness, plus long-run VmHWM
   tracking on the real VPS.
+
+---
+
+# Sprint 2 memory benchmark + cgroup-vs-RSS investigation
+
+Measured 2026-11-10 on the development VPS (same environment as Sprint 1:
+Ubuntu 26.04.1, kernel 7.0.0-38-generic, 4 vCPU / 5.8 GiB RAM / 0 swap,
+systemd 259, hardened unit `MemoryMax=256M`). Release
+`0.2.2-sprint2`, static linux/amd64, stripped.
+
+## Results
+
+| Measurement                                    | Value                    | Source                     |
+| ---------------------------------------------- | ------------------------ | -------------------------- |
+| MemoryCurrent, fresh start (unclaimed)         | **2.17 MiB** (2,273,280 B) | systemd cgroup          |
+| VmRSS, fresh start                             | **10.9 MiB** (11,172 kB) | `/proc/PID/status`         |
+| Pss_File (mapped binary pages), fresh start    | 9.59 MiB (9,588 kB)      | `smaps_rollup`             |
+| Pss_Anon, fresh start                          | 1.54 MiB (1,576 kB)      | `smaps_rollup`             |
+| MemoryCurrent after 300 × /healthz (1.35 s)    | 3.87 MiB (4,059,136 B)   | systemd cgroup             |
+| VmHWM after load                               | 12.2 MiB (12,480 kB)     | `VmHWM`                    |
+| MemoryCurrent peak during argon2id login burst | **41.9 MiB** (43,970,560 B) | systemd cgroup          |
+| VmHWM after 6 concurrent wrong-password logins | **50.3 MiB** (51,536 kB) | `VmHWM`                    |
+| `/readyz` during/after bursts                  | ready throughout         | curl                       |
+| Static binary size                             | 9.4 MiB                  | file size                  |
+| systemd-analyze security                       | **3.7 (OK, low exposure)** | systemd-analyze          |
+
+Reading the numbers:
+
+- The idle daemon (fresh state, no sessions) sits at ~2 MiB charged to
+  its cgroup and ~11 MiB process RSS — the difference is the mapped
+  binary (see the accounting investigation below).
+- Each argon2id password verification allocates a ~19 MiB workspace.
+  With the concurrency bound (`argonConcurrency = 2` in
+  `internal/httpapi`), a burst of 6 concurrent logins peaked at
+  ~44 MiB cgroup / ~50 MiB VmHWM and stayed there (Go returns freed
+  pages lazily via `MADV_FREE`; under cgroup memory pressure the pages
+  are reclaimed). That is ~18 % of the 256 MiB ceiling and ~9 % of a
+  512 MiB box — bounded by construction, since the third concurrent
+  verification gets `503 busy`.
+- `/readyz` remained `ready` through the load pass and both login
+  bursts.
+
+## Why cgroup `MemoryCurrent` ≪ process RSS
+
+Sprint 1 recorded `MemoryCurrent = 3.65 MiB` against `VmRSS = 11.76 MiB`
+and attributed the gap vaguely to "shared/read-only page attribution".
+Sprint 2 measured it precisely (fresh process, release 0.2.1):
+
+| Counter                                   | Value        |
+| ----------------------------------------- | ------------ |
+| cgroup `memory.current`                   | 2.17 MiB     |
+| cgroup `memory.stat` anon                 | 1.54 MiB     |
+| cgroup `memory.stat` file                 | **0.05 MiB** (52 kB) |
+| cgroup `memory.stat` slab                 | 0.23 MiB     |
+| process `VmRSS`                           | 10.9 MiB     |
+| process `smaps_rollup` Pss_File           | **9.59 MiB** |
+| process `smaps_rollup` Pss_Anon           | 1.54 MiB     |
+
+The process has 9.59 MiB of file-backed pages resident (the mapped
+`drevantad` binary), but the service cgroup's `file` counter holds only
+52 kB — essentially none of them. Explanation: **a cgroup-v2 page is
+charged to exactly one cgroup — the one that first faults it in**. The
+binary file was written to disk by the deployment process (root's
+session/cgroup), which pulled it into the page cache charged to *that*
+cgroup. When `drevantad` later maps and faults those pages, the kernel
+finds them already present and charged elsewhere, so mapping costs the
+service cgroup ~nothing. Per-process RSS counts every resident page
+regardless of which cgroup is charged — hence the ~9 MiB gap, which
+matches `Pss_File` almost exactly (9.59 vs 11.76 − 2.17 ≈ 9.6).
+
+Practical consequences:
+
+- `MemoryCurrent` is the right number for capacity planning *of the
+  service's own allocations* (it is what `MemoryMax` bounds); it will
+  jump by the full binary size (~9 MiB) if the page cache happens to be
+  evicted and re-faulted from within the service cgroup (e.g. after
+  `drop_caches` or a copy from a cold page cache), and after argon2id
+  verifications (see above).
+- `VmRSS`/`VmHWM` remain the right numbers for "how much RAM does this
+  process touch".
+
+## Fit against the memory budget (Sprint 2)
+
+| Budget                       | Headroom                                            |
+| ---------------------------- | --------------------------------------------------- |
+| `MemoryMax=256M` ceiling     | bounded burst peak ~44 MiB ≈ **17 %** of the ceiling |
+| 512 MiB-class VPS RAM        | bounded burst peak ≈ **8.6 %** of total RAM          |
+
+The argon2id concurrency bound (2 slots) is what makes the worst case
+predictable; without it, N concurrent logins would allocate N × 19 MiB.

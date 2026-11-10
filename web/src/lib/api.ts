@@ -55,3 +55,82 @@ export async function isUp(url: string): Promise<boolean> {
 		return false;
 	}
 }
+
+// --- Sprint 2: identity & onboarding ---
+
+export type InstanceStatus = 'unclaimed' | 'mfa_pending' | 'active';
+
+export interface SessionInfo {
+	authenticated: boolean;
+	instance_status: InstanceStatus;
+	mfa_enabled: boolean;
+	username: string;
+	scope: string;
+}
+
+export interface OnboardingStatus extends SessionInfo {
+	mfa_mode: string;
+	claim_token_active: boolean;
+}
+
+/** API error with the daemon's machine-readable code. */
+export class ApiError extends Error {
+	status: number;
+	code: string;
+
+	constructor(status: number, code: string, message: string) {
+		super(message);
+		this.status = status;
+		this.code = code;
+	}
+}
+
+export async function fetchSession(): Promise<SessionInfo> {
+	const res = await fetch('/api/v1/auth/session', { headers: { accept: 'application/json' } });
+	if (!res.ok) throw new ApiError(res.status, 'http_error', `HTTP ${res.status}`);
+	return (await res.json()) as SessionInfo;
+}
+
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+	const res = await fetch('/api/v1/onboarding/status', { headers: { accept: 'application/json' } });
+	if (!res.ok) throw new ApiError(res.status, 'http_error', `HTTP ${res.status}`);
+	return (await res.json()) as OnboardingStatus;
+}
+
+/** POST JSON and parse the reply; non-2xx raises ApiError with the daemon's code. */
+export async function postJSON<T>(url: string, body: unknown): Promise<T> {
+	const res = await fetch(url, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', accept: 'application/json' },
+		body: JSON.stringify(body ?? {})
+	});
+	const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+	if (!res.ok) {
+		throw new ApiError(
+			res.status,
+			typeof data['error'] === 'string' ? (data['error'] as string) : 'unknown_error',
+			typeof data['message'] === 'string' ? (data['message'] as string) : `HTTP ${res.status}`
+		);
+	}
+	return data as T;
+}
+
+export interface LoginResult {
+	user: { username: string; mfa_enabled: boolean };
+	instance_status: InstanceStatus;
+	scope: string;
+}
+
+export interface MfaSetup {
+	secret: string;
+	otpauth_uri: string;
+}
+
+export interface MfaVerified {
+	recovery_codes: string[];
+	next: string;
+}
+
+export async function logout(): Promise<void> {
+	await postJSON('/api/v1/auth/logout', {}).catch(() => undefined);
+}
