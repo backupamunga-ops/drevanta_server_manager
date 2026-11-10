@@ -1,6 +1,6 @@
 // Package httpapi wires the frozen Sprint 1 API surface, the Sprint 2
-// identity/onboarding endpoints, and the embedded dashboard into one
-// loopback-only HTTP handler.
+// identity/onboarding endpoints, the post-install access endpoints, and
+// the embedded dashboard into one loopback-only HTTP handler.
 //
 // API surface:
 //
@@ -14,12 +14,21 @@
 //	POST /api/v1/onboarding/claim          — claim token + administrator creation
 //	POST /api/v1/onboarding/mfa/setup      — begin TOTP enrolment
 //	POST /api/v1/onboarding/mfa/verify     — confirm TOTP, issue recovery codes
-//	POST /api/v1/onboarding/mfa/skip       — explicit MFA skip (risk acknowledged)
+//	POST /api/v1/onboarding/mfa/skip       — "Skip for now" (explicit risk acknowledgement)
+//	GET  /api/v1/access/status             — trusted access mode (public, secret-free)
+//	POST /api/v1/access/domain/check       — DNS points at this VPS? (full scope)
+//	POST /api/v1/access/domain/apply       — verify + issue + route-verify, fail-safe (full scope)
+//	POST /api/v1/access/domain/remove      — clear the domain slot (full scope)
+//	GET  /api/v1/account/mfa               — MFA posture for Account Security (full scope)
+//	POST /api/v1/account/mfa/setup         — begin TOTP enrolment later (full scope)
+//	POST /api/v1/account/mfa/verify        — enable MFA later, issue recovery codes (full scope)
 //	GET  /                                 — embedded SvelteKit dashboard
 //
 // /healthz and /readyz stay unauthenticated by design (systemd and
-// monitoring need them and they reveal nothing); every other /api route
-// requires a session, and metrics additionally requires full scope.
+// monitoring need them and they reveal nothing); /api/v1/access/status
+// is public but carries the same secret-free facts the installer
+// prints; every other /api route requires a session, and metrics,
+// account and domain routes additionally require full scope.
 package httpapi
 
 import (
@@ -41,6 +50,7 @@ type server struct {
 	collector  *metrics.Collector
 	limiter    *auth.RateLimiter
 	argonSlots chan struct{}
+	access     *AccessView // nil in identity-only test rigs: access endpoints then 503
 }
 
 // argonConcurrency bounds how many password verifications run at once.
@@ -51,14 +61,23 @@ type server struct {
 // anyway, so this is a memory-safety backstop, not a load feature).
 const argonConcurrency = 2
 
-// New builds the full HTTP handler.
+// New builds the full HTTP handler (no access view: the access
+// endpoints answer 503).
 func New(st *store.Store, version string, diskPaths []string) http.Handler {
+	return NewWithAccess(st, version, diskPaths, nil)
+}
+
+// NewWithAccess builds the full HTTP handler with the trusted access
+// view (paths to the access configuration, the proxy status file and
+// the domain overlay) that backs the access-mode and domain endpoints.
+func NewWithAccess(st *store.Store, version string, diskPaths []string, access *AccessView) http.Handler {
 	srv := &server{
 		st:         st,
 		version:    version,
 		collector:  metrics.NewCollector(diskPaths),
 		limiter:    auth.NewRateLimiter(10, time.Minute),
 		argonSlots: make(chan struct{}, argonConcurrency),
+		access:     access,
 	}
 	mux := http.NewServeMux()
 
@@ -75,6 +94,18 @@ func New(st *store.Store, version string, diskPaths []string) http.Handler {
 	mux.Handle("POST /api/v1/onboarding/claim", srv.guard(srv.handleClaim))
 	mux.Handle("POST /api/v1/onboarding/mfa/setup", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFASetup)))
 	mux.Handle("POST /api/v1/onboarding/mfa/verify", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFAVerify)))
+	mux.Handle("POST /api/v1/onboarding/mfa/skip", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFASkip)))
+
+	// --- Post-install access (trusted configuration, never the URL) ---
+	mux.HandleFunc("GET /api/v1/access/status", srv.handleAccessStatus)
+	mux.Handle("POST /api/v1/access/domain/check", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainCheck)))
+	mux.Handle("POST /api/v1/access/domain/apply", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainApply)))
+	mux.Handle("POST /api/v1/access/domain/remove", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainRemove)))
+
+	// --- Account Security (enable MFA later) ---
+	mux.Handle("GET /api/v1/account/mfa", srv.requireFullSession(srv.handleAccountMFAStatus))
+	mux.Handle("POST /api/v1/account/mfa/setup", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountMFASetup)))
+	mux.Handle("POST /api/v1/account/mfa/verify", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountMFAVerify)))
 
 	// Strict API namespace: unknown /api/* paths are 404 JSON, never the
 	// SPA fallback.

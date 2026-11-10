@@ -194,3 +194,46 @@ VALUES (?, ?, ?, ?, ?)`,
 	}
 	return nil
 }
+
+// AuditEvent is one read-back row of the audit log.
+type AuditEvent struct {
+	ID     int64
+	TS     time.Time
+	Actor  string
+	Action string
+	Target string
+	Detail string // raw JSON object
+}
+
+// RecentAuditEvents returns up to limit events, newest first, filtered
+// to one action when action is non-empty. Read-only diagnostics for
+// tests and the CLI; it never contains secret values.
+func (s *Store) RecentAuditEvents(ctx context.Context, action string, limit int) ([]AuditEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT id, ts, actor, action, target, detail FROM audit_events`
+	args := []any{}
+	if action != "" {
+		q += ` WHERE action = ?`
+		args = append(args, action)
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit select: %w", err)
+	}
+	defer rows.Close()
+	var out []AuditEvent
+	for rows.Next() {
+		var e AuditEvent
+		var ts string
+		if err := rows.Scan(&e.ID, &ts, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			return nil, fmt.Errorf("audit scan: %w", err)
+		}
+		e.TS = parseTime(ts)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

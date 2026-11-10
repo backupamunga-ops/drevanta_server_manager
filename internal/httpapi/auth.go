@@ -4,10 +4,14 @@
 //
 //	unclaimed --claim(token+credentials)--> mfa_pending
 //	mfa_pending --mfa/verify--> active (mfa_mode=totp)
+//	mfa_pending --mfa/skip (explicit risk acknowledgement)--> active (mfa_mode=skipped)
 //
-// MFA is MANDATORY for the initial administrator: there is no skip
-// path. The historical mfa/skip endpoint (mfa_mode="skipped") was
-// removed; instances that skipped before the removal keep working.
+// MFA is strongly recommended but no longer mandatory: the initial
+// administrator may "Skip for now" with an explicit, audited risk
+// acknowledgement, reaches the dashboard immediately, and can enable
+// MFA at any time under Account Security (recovery codes are always
+// issued when MFA is enabled). Administrators who enrolled keep every
+// protection; a skipped account behaves like any account without MFA.
 //
 // Security properties enforced here:
 //   - The claim token is single-use, expiring, and stored hashed; a
@@ -335,6 +339,177 @@ func (s *server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	audit(r.Context(), s.st, sess.username, "mfa_enabled", "user", nil)
 	audit(r.Context(), s.st, sess.username, "onboarding_completed", "instance", map[string]any{"mfa_mode": "totp"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recovery_codes": codes,
+		"next":           "done",
+	})
+}
+
+// ---------------------------------------------------------------------------
+// "Skip for now" (session scope: onboarding, state: mfa_pending)
+// ---------------------------------------------------------------------------
+
+// mfaSkipRequest is the explicit acknowledgement payload: the skip is
+// only accepted when the operator consciously acknowledged the risk.
+type mfaSkipRequest struct {
+	AcknowledgeRisk bool `json:"acknowledge_risk"`
+}
+
+// handleMFASkip completes onboarding WITHOUT MFA (mfa_mode="skipped"):
+// the administrator reaches the dashboard immediately and can enable
+// MFA later under Account Security. The skip is refused without the
+// explicit acknowledgement flag and is always audited.
+func (s *server) handleMFASkip(w http.ResponseWriter, r *http.Request) {
+	if !s.limiter.Allow(clientKey(r, "mfa")) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, slow down")
+		return
+	}
+	sess := sessionFrom(r.Context())
+	if !s.requireMFAPending(w, r) {
+		return
+	}
+	var req mfaSkipRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if !req.AcknowledgeRisk {
+		writeError(w, http.StatusBadRequest, "acknowledgment_required",
+			"skipping MFA requires an explicit risk acknowledgement")
+		return
+	}
+	if err := s.st.FinishOnboarding(r.Context(), "skipped"); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not complete onboarding")
+		return
+	}
+	if err := s.st.SetSessionScope(r.Context(), auth.TokenHash(sess.raw), store.ScopeFull); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not upgrade session")
+		return
+	}
+	audit(r.Context(), s.st, sess.username, "mfa_skipped", "instance",
+		map[string]any{"acknowledged": true, "mfa_mode": "skipped"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":            map[string]string{"username": sess.username},
+		"instance_status": store.StatusActive,
+		"mfa_mode":        "skipped",
+		"next":            "done",
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Account Security: enable MFA later (session scope: full, state: active)
+// ---------------------------------------------------------------------------
+
+// handleAccountMFAStatus reports the caller's MFA posture for the
+// Account Security page (no secrets).
+func (s *server) handleAccountMFAStatus(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	user, err := s.st.UserByID(r.Context(), sess.rec.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account unavailable")
+		return
+	}
+	unused, uerr := s.st.UnusedRecoveryCodeCount(r.Context(), user.ID)
+	if uerr != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not read recovery codes")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mfa_enabled":           user.MFAEnabled,
+		"mfa_mode":              instanceMFAMode(s, r),
+		"recovery_codes_unused": unused,
+	})
+}
+
+// instanceMFAMode reads the instance-level MFA decision ("totp",
+// "skipped" or ""). Failures degrade to the empty string: the page
+// works without it.
+func instanceMFAMode(s *server, r *http.Request) string {
+	state, err := s.st.InstanceState(r.Context())
+	if err != nil {
+		return ""
+	}
+	return state.MFAMode
+}
+
+func (s *server) handleAccountMFASetup(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	user, err := s.st.UserByID(r.Context(), sess.rec.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account unavailable")
+		return
+	}
+	if user.MFAEnabled {
+		writeError(w, http.StatusConflict, "mfa_already_enabled",
+			"MFA is already enabled for this account")
+		return
+	}
+	secret, err := auth.NewTOTPSecret()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not generate secret")
+		return
+	}
+	if err := s.st.SetMFASecret(r.Context(), user.ID, secret); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not store secret")
+		return
+	}
+	audit(r.Context(), s.st, sess.username, "mfa_setup_started", "user",
+		map[string]any{"context": "account_security"})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"secret":      secret,
+		"otpauth_uri": auth.TOTPURI(secret, "Drevanta", sess.username),
+	})
+}
+
+func (s *server) handleAccountMFAVerify(w http.ResponseWriter, r *http.Request) {
+	if !s.limiter.Allow(clientKey(r, "mfa")) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many attempts, slow down")
+		return
+	}
+	sess := sessionFrom(r.Context())
+	user, err := s.st.UserByID(r.Context(), sess.rec.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "account unavailable")
+		return
+	}
+	if user.MFAEnabled {
+		writeError(w, http.StatusConflict, "mfa_already_enabled",
+			"MFA is already enabled for this account")
+		return
+	}
+	var req mfaCodeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if user.MFASecret == "" {
+		writeError(w, http.StatusBadRequest, "mfa_not_setup", "start the MFA setup first")
+		return
+	}
+	step, ok, err := auth.VerifyTOTP(user.MFASecret, req.Code, time.Now())
+	if err != nil || !ok {
+		audit(r.Context(), s.st, sess.username, "mfa_verify_failed", "user",
+			map[string]any{"context": "account_security"})
+		writeError(w, http.StatusUnauthorized, "totp_invalid", "invalid authenticator code")
+		return
+	}
+	if err := s.st.EnableMFA(r.Context(), user.ID, step); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not enable MFA")
+		return
+	}
+	// Recovery codes are REQUIRED whenever MFA is enabled — including
+	// this later-enable path: a fresh set replaces any old set.
+	codes, hashes, err := generateRecoveryCodes(10)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not generate recovery codes")
+		return
+	}
+	if err := s.st.ReplaceRecoveryCodes(r.Context(), user.ID, hashes); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not store recovery codes")
+		return
+	}
+	audit(r.Context(), s.st, sess.username, "mfa_enabled", "user",
+		map[string]any{"context": "account_security"})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"recovery_codes": codes,
 		"next":           "done",

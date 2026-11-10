@@ -323,60 +323,11 @@ func TestOnboardingJourney(t *testing.T) {
 	}
 }
 
-// TestOnboardingSkipRemoved pins that MFA is mandatory for the initial
-// administrator: the historical skip endpoint is gone (404) and the
-// only way out of mfa_pending is a successful mfa/verify.
-func TestOnboardingSkipRemoved(t *testing.T) {
-	h, st := newTestHandler(t)
-	ctx := context.Background()
+// The former TestOnboardingSkipRemoved (MFA mandatory, skip endpoint
+// 404) was replaced by the optional-MFA suite in access_test.go:
+// TestMFAOptionalSkipForNow, TestMFAEnrolledUsersKeepProtection and
+// TestAccountMFAEnableLater.
 
-	token, _, _ := auth.NewToken()
-	_, _ = st.CreateClaimToken(ctx, auth.TokenHash(token), time.Hour)
-
-	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
-	sessCookie := cookieOf(rec)
-	sessHdr := map[string]string{"Cookie": sessCookie.Name + "=" + sessCookie.Value}
-
-	// The skip endpoint no longer exists — even with the risk
-	// acknowledged.
-	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",
-		`{"acknowledge_risk":true}`, sessHdr)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("skip endpoint = %d, want 404 (MFA is mandatory)", rec.Code)
-	}
-
-	// A paused onboarding may sign in password-only, but that session is
-	// onboarding-scoped: no full API access before MFA enrolment.
-	rec = do(t, h, http.MethodPost, "/api/v1/auth/login",
-		`{"username":"admin","password":"correct horse battery"}`, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("resume login = %d: %s", rec.Code, rec.Body.String())
-	}
-	if got := decodeMap(t, rec)["scope"]; got != "onboarding" {
-		t.Fatalf("resume login scope = %v, want onboarding (MFA still pending)", got)
-	}
-	resumeHdr := map[string]string{"Cookie": cookieOf(rec).Name + "=" + cookieOf(rec).Value}
-	rec = do(t, h, http.MethodGet, "/api/v1/server/metrics", "", resumeHdr)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("metrics with onboarding scope = %d, want 403", rec.Code)
-	}
-
-	// Only a correct TOTP verify completes onboarding.
-	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", resumeHdr)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup = %d: %s", rec.Code, rec.Body.String())
-	}
-	secret := decodeMap(t, rec)["secret"].(string)
-	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/verify",
-		fmt.Sprintf(`{"code":%q}`, currentTOTP(t, secret)), sessHdr)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("verify = %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestClaimStateGuards pins the first-owner semantics: a claimed instance
-// cannot be claimed again, and MFA endpoints refuse wrong states.
 func TestClaimStateGuards(t *testing.T) {
 	h, st := newTestHandler(t)
 	ctx := context.Background()
