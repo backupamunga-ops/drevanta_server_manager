@@ -4,6 +4,28 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.14] — sign-in is two screens: credentials, then the code
+
+### Changed
+- **The login flow is now two-step.** The password is verified first; when
+  MFA is enabled, the console moves to a separate "Two-step verification"
+  screen instead of extending the sign-in form with an inline code field
+  beneath a red error. The second screen asks only for the authenticator
+  code (6-digit code or a single-use recovery code), states which account
+  is signing in, autofocuses the field, offers Back, and signs in to the
+  dashboard on success. The `totp_required` challenge no longer renders as
+  an error at all — a wrong code shows its error only on the code screen;
+  a wrong password keeps the error on step 1. Backend untouched: the
+  existing login contract (password → `totp_required` → credentials +
+  code) is used as-is.
+
+### Fixed
+- **The password field has a Show/Hide toggle** — a real visibility
+  control inside the field (Show ↔ Hide with `aria-pressed`), masked by
+  default. The input also fills the card width now: the field wrapper is
+  a plain div rather than a flex container, so the input previously kept
+  its intrinsic ~20ch width and floated apart from the toggle.
+
 ## [0.4.13] — the secret section is a real disclosure: collapsed until Reveal
 
 ### Fixed
