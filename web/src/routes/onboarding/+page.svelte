@@ -85,6 +85,11 @@
         let otpShake = $state(false);
         let otpEls = $state<(HTMLInputElement | null)[]>([]);
         let mfaDone = $state(false);
+        // Completion-checklist re-entry: true while the operator follows a
+        // link from the done screen ("secure your account" / "configure
+        // domain") — navigation returns to the checklist instead of
+        // marching on through the wizard.
+        let returnToDone = $state(false);
         let mfaSkipped = $state(false);
         let copyDone = $state(false);
         let copyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -621,6 +626,10 @@
 
         function finishRecovery() {
                 if (!codesSaved) return;
+                if (returnToDone) {
+                        backToDone();
+                        return;
+                }
                 step = 'domain';
         }
 
@@ -649,6 +658,27 @@
 
         /** Default path: keep the server-IP address, no extra setup. */
         function proceedWithIp() {
+                returnToDone = false;
+                step = 'done';
+                void loadDoneStats();
+        }
+
+        /** Completion checklist: start MFA enrolment in place. */
+        function secureAccountFromDone() {
+                returnToDone = true;
+                void beginMfaSetup();
+        }
+
+        /** Completion checklist: jump to the domain configuration screen. */
+        function configureDomainFromDone() {
+                returnToDone = true;
+                step = 'domain';
+                domainScreen = true;
+        }
+
+        /** Leave the re-entry flow and show the checklist again. */
+        function backToDone() {
+                returnToDone = false;
                 step = 'done';
                 void loadDoneStats();
         }
@@ -737,16 +767,66 @@
                         announce('Custom domain verified. You can open the console at https://' + res.domain + '/');
                 } catch (err) {
                         if (seq !== dnsSeq) return;
-                        // The domain stays DNS-verified: the success panel remains
-                        // so provisioning can be retried or skipped.
-                        domainError = err instanceof ApiError ? err.message : String(err);
-                        domainStage = 'input';
+                        if (err instanceof ApiError) {
+                                // The domain stays DNS-verified: the success panel remains
+                                // so provisioning can be retried or skipped.
+                                domainError = err.message;
+                                domainStage = 'input';
+                        } else {
+                                // Network-level failure: the connection was cut while the
+                                // certificate wait was still running (this is what a
+                                // "TypeError: Failed to fetch" means here). Provisioning
+                                // continues in the background — poll the trusted status
+                                // endpoint for the outcome instead of a hard error.
+                                const applied = await pollDomainOutcome(requested, seq);
+                                if (seq !== dnsSeq) return;
+                                if (!applied) {
+                                        domainError =
+                                                'Lost contact while the certificate was being issued. Provisioning may still finish — open https://' +
+                                                requested + ' in a moment, or retry.';
+                                        domainStage = 'input';
+                                }
+                        }
                 } finally {
                         if (seq === dnsSeq) domainBusy = false;
                 }
         }
 
+        /**
+         * Poll the secret-free access status for the domain slot going
+         * active (the apply request's connection died mid-wait). Aborts as
+         * soon as the sequence moves — the operator edited the input or
+         * navigated — and gives up after ~90s, matching the backend's
+         * certificate wait window.
+         */
+        async function pollDomainOutcome(domain: string, seq: number): Promise<boolean> {
+                for (let i = 0; i < 45; i++) {
+                        await new Promise((r) => setTimeout(r, 2000));
+                        if (seq !== dnsSeq) return false;
+                        try {
+                                const st = await fetchAccessStatus();
+                                const d = st.https?.domain;
+                                if (d && d.host === domain && d.cert_valid && d.phase === 'active') {
+                                        if (seq !== dnsSeq) return false;
+                                        domainApplied = d.host;
+                                        domainStage = 'applied';
+                                        announce('Custom domain verified. You can open the console at https://' + d.host + '/');
+                                        return true;
+                                }
+                                if (d && d.host === domain && d.phase === 'error' && d.last_error) {
+                                        domainError = d.last_error;
+                                        domainStage = 'input';
+                                        return false;
+                                }
+                        } catch {
+                                // Status polls may fail while TLS is busy; keep polling.
+                        }
+                }
+                return false;
+        }
+
         function finishDomain() {
+                returnToDone = false;
                 step = 'done';
                 void loadDoneStats();
         }
@@ -1236,7 +1316,14 @@
                                         </button>
                                 </form>
 
-                                {#if !skipShown}
+                                {#if returnToDone}
+                                        <div class="oskip-row">
+                                                <span class="oskip-row__text">MFA is optional — you can also finish this later.</span>
+                                                <button class="olinkbtn oskip-row__btn" type="button" onclick={backToDone}>
+                                                        ← Back to checklist
+                                                </button>
+                                        </div>
+                                {:else if !skipShown}
                                         <div class="oskip-row">
                                                 <span class="oskip-row__text">Recommended, not required.</span>
                                                 <button class="olinkbtn oskip-row__btn" type="button" onclick={() => (skipShown = true)}>
@@ -1451,7 +1538,11 @@
                                 <div class="odivider"></div>
                                 <div class="odomain-exit">
                                         <button class="obtn obtn--secondary" type="button" onclick={proceedWithIp}>Skip — keep using the server IP</button>
-                                        <button class="olinkbtn" type="button" onclick={() => (domainScreen = false)}>← Back to address choices</button>
+                                        {#if returnToDone}
+                                                <button class="olinkbtn" type="button" onclick={backToDone}>← Back to checklist</button>
+                                        {:else}
+                                                <button class="olinkbtn" type="button" onclick={() => (domainScreen = false)}>← Back to address choices</button>
+                                        {/if}
                                 </div>
                         {/if}
                 {:else if step === 'done'}
@@ -1483,7 +1574,10 @@
                                                                 <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
                                                         </span>
                                                         <span class="odone__name">MFA authentication</span>
-                                                        <span class="odone__val">Not set — secure your account in Settings</span>
+                                                        <span class="odone__val">Not set</span>
+                                                        <button class="olinkbtn odone__action" type="button" onclick={secureAccountFromDone}>
+                                                                Secure your account
+                                                        </button>
                                                 {/if}
                                         </div>
                                         <div class="odone__row">
@@ -1492,6 +1586,11 @@
                                                 </span>
                                                 <span class="odone__name">Domain configuration</span>
                                                 <span class="odone__val mono">{finalAddress || serverIp || accessPill}</span>
+                                                {#if !domainApplied && serverIp}
+                                                        <button class="olinkbtn odone__action" type="button" onclick={configureDomainFromDone}>
+                                                                Configure domain
+                                                        </button>
+                                                {/if}
                                         </div>
                                         <div class="odivider"></div>
                                         <div class="odone__stats mono">
@@ -2238,6 +2337,12 @@
                 margin-top: 10px;
         }
 
+        /* A real text field lives here: show the caret affordance and a
+           focus ring on the container, like the other inputs. */
+        .okey-field:focus-within {
+                border-color: var(--accent);
+        }
+
         /* The secret is a real (readonly) text input so Reveal/Hide swaps the
            whole field content (mask <-> plaintext); no clipping of the
            revealed secret for the standard 32-char base32 group display. */
@@ -2742,6 +2847,7 @@
                 padding: 7px 0;
                 border-bottom: 1px solid var(--line-soft);
                 font-size: 11.5px;
+                flex-wrap: wrap;
         }
 
         .odone__row:last-of-type {
@@ -2776,12 +2882,28 @@
                 font-weight: 650;
         }
 
+        /* Checklist action links ("Secure your account" / "Configure
+           domain"): navigate back into the wizard from the done screen.
+           With row wrapping on, a tight row drops the link to its own
+           right-aligned line instead of breaking the value mid-string. */
+        .odone__action {
+                flex: 0 0 auto;
+                margin-left: auto;
+                font-size: 11px;
+        }
+
         .odone__val {
                 flex: 0 1 auto;
                 min-width: 0;
                 color: var(--muted);
                 text-align: right;
                 overflow-wrap: anywhere;
+        }
+
+        /* URLs and addresses never break mid-string: when the row is tight
+           the action link wraps to the next line instead. */
+        .odone__val.mono {
+                white-space: nowrap;
         }
 
         .odone__stats {

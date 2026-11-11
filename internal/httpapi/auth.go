@@ -270,9 +270,35 @@ func (s *server) requireMFAPending(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
+// requireMFAEnrollable admits MFA enrolment in exactly two situations:
+//
+//  1. the first-owner run: onboarding is awaiting MFA (mfa_pending);
+//  2. post-completion re-enrolment: the instance is active but the
+//     operator skipped MFA (mfa_mode "skipped" or "") — the completion
+//     checklist's "secure your account" link starts enrolment in place.
+//
+// Once mfa_mode is "totp" enrolment is closed here; disabling MFA is a
+// Settings/Account-Security operation, never an onboarding one.
+func (s *server) requireMFAEnrollable(w http.ResponseWriter, r *http.Request) bool {
+	state, err := s.st.InstanceState(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "state unavailable")
+		return false
+	}
+	switch {
+	case state.Status == store.StatusMFAPending:
+		return true
+	case state.Status == store.StatusActive && state.MFAMode != "totp":
+		return true
+	default:
+		writeError(w, http.StatusConflict, "wrong_state", "MFA is already enabled")
+		return false
+	}
+}
+
 func (s *server) handleMFASetup(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	if !s.requireMFAPending(w, r) {
+	if !s.requireMFAEnrollable(w, r) {
 		return
 	}
 	secret, err := auth.NewTOTPSecret()
@@ -297,7 +323,7 @@ func (s *server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := sessionFrom(r.Context())
-	if !s.requireMFAPending(w, r) {
+	if !s.requireMFAEnrollable(w, r) {
 		return
 	}
 	var req mfaCodeRequest
@@ -329,8 +355,23 @@ func (s *server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not store recovery codes")
 		return
 	}
-	if err := s.st.FinishOnboarding(r.Context(), "totp"); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "could not complete onboarding")
+	// First run: onboarding is still awaiting MFA, so completion is the
+	// guarded mfa_pending -> active transition. Re-enrolment (operator
+	// skipped MFA and starts it from the completion checklist): the
+	// instance is already active — record the decision in place instead.
+	state, err := s.st.InstanceState(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "state unavailable")
+		return
+	}
+	firstRun := state.Status == store.StatusMFAPending
+	if firstRun {
+		if err := s.st.FinishOnboarding(r.Context(), "totp"); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "could not complete onboarding")
+			return
+		}
+	} else if err := s.st.SetMFAMode(r.Context(), "totp"); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not record MFA decision")
 		return
 	}
 	if err := s.st.SetSessionScope(r.Context(), auth.TokenHash(sess.raw), store.ScopeFull); err != nil {
@@ -338,7 +379,9 @@ func (s *server) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audit(r.Context(), s.st, sess.username, "mfa_enabled", "user", nil)
-	audit(r.Context(), s.st, sess.username, "onboarding_completed", "instance", map[string]any{"mfa_mode": "totp"})
+	if firstRun {
+		audit(r.Context(), s.st, sess.username, "onboarding_completed", "instance", map[string]any{"mfa_mode": "totp"})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"recovery_codes": codes,
 		"next":           "done",

@@ -119,7 +119,22 @@ func (p *Proxy) HTTPSHandler() (http.Handler, error) {
 			h.Set("X-Real-IP", clientIP)
 		},
 	}
-	return securityHeaders(rp), nil
+	// applyDeadlineWrapper extends the write deadline for the domain-apply
+	// route: the backend legitimately holds that response open for the
+	// whole certificate wait (up to the 90s wait timeout), which exceeds
+	// this server's blanket 60s WriteTimeout on the HTTP/1.1 edge.
+	// (HTTP/2 connections are not subject to WriteTimeout in net/http.)
+	// net/http re-arms the original deadline for the next request.
+	applyDeadline := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/access/domain/apply" {
+				_ = http.NewResponseController(w).SetWriteDeadline(
+					time.Now().Add(150 * time.Second))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	return securityHeaders(applyDeadline(rp)), nil
 }
 
 // securityHeaders adds the HTTPS-only response headers.

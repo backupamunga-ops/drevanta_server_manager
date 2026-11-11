@@ -4,6 +4,35 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.11] — interactive completion checklist + domain apply connection fix + fresh UI bundles
+
+### Added
+- **The completion screen is now an interactive checklist**: MFA not set
+  shows "(x) MFA authentication — Not set [Secure your account]" and the
+  link re-opens MFA enrolment in place (new `requireMFAEnrollable` guard:
+  enrolment is allowed post-completion while mfa_mode is "skipped"/"" and
+  closes once "totp" — audited, recovery codes re-issued, instance stays
+  active via the new `SetMFAMode` store method). Using the server IP shows
+  "[Configure domain]" which jumps back to the domain configuration
+  screen; finishing (or skipping) returns to the checklist with refreshed
+  stats and timestamp. Wizard screens in re-entry mode show "← Back to
+  checklist".
+
+### Fixed
+- **"Enable and verify HTTPS" could fail with "TypeError: Failed to
+  fetch"**: the certificate wait legitimately holds the response open for
+  up to 90s, but the loopback server (20s) and the TLS edge (60s) write
+  deadlines cut the connection first — while provisioning silently
+  continued. The apply handler and the proxy now extend the write
+  deadline per-request past the wait window, and the UI polls the trusted
+  status endpoint for the domain slot outcome instead of showing a hard
+  error when the connection is lost.
+- **Stale UI after an upgrade**: embedded HTML shells were served without
+  cache headers, so browsers heuristically kept serving the previous
+  release's bundle (symptom: "not implemented yet" until a hard refresh).
+  HTML now ships `Cache-Control: no-store, must-revalidate`, immutable
+  hashed assets keep their year-long cache, everything else revalidates.
+
 ## [0.4.10] — onboarding: manual-entry secret is a real text field
 
 ### Changed

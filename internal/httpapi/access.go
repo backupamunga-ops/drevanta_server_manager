@@ -306,6 +306,15 @@ func (s *server) handleDomainCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleDomainApply(w http.ResponseWriter, r *http.Request) {
+	// The certificate wait below legitimately holds this response open for
+	// up to waitTimeout (default 90s). Extend this request's write
+	// deadline past the server's blanket WriteTimeout (20s loopback) so
+	// the response is never cut mid-wait — a cut connection showed up in
+	// the browser as "TypeError: Failed to fetch" while provisioning
+	// silently continued. net/http re-arms the original deadline for the
+	// next request on the connection.
+	_ = http.NewResponseController(w).SetWriteDeadline(
+		time.Now().Add(s.access.waitTimeout() + 30*time.Second))
 	sess := sessionFrom(r.Context())
 	var req domainRequest
 	if err := decodeJSON(r, &req); err != nil {

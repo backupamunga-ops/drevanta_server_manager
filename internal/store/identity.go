@@ -174,6 +174,31 @@ func (s *Store) FinishOnboarding(ctx context.Context, mfaMode string) error {
 	return s.setStateStatus(ctx, StatusMFAPending, StatusActive, mfaMode, nil)
 }
 
+// SetMFAMode records the MFA decision on an already-active instance — the
+// post-completion re-enrolment path (operator enables MFA from the
+// completion checklist after having skipped it). It refuses on anything
+// but the active singleton: first-run completion must go through
+// FinishOnboarding's guarded mfa_pending -> active transition instead,
+// and there is no legitimate way to touch an unclaimed instance here.
+func (s *Store) SetMFAMode(ctx context.Context, mfaMode string) error {
+	now := nowStr()
+	res, err := s.db.ExecContext(ctx, `
+UPDATE instance_state
+SET mfa_mode = ?, mfa_decided_at = ?, updated_at = ?
+WHERE id = 1 AND status = ?`, mfaMode, now, now, StatusActive)
+	if err != nil {
+		return fmt.Errorf("set mfa mode: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set mfa mode rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("set mfa mode rejected: instance is not active")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------

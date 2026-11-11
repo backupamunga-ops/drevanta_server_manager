@@ -52,10 +52,21 @@ func Handler() http.Handler {
 			}
 		}
 		if _, err := fs.Stat(sub, p); err != nil {
-			// Unknown path: serve the SPA entry point.
+			// Unknown path: serve the SPA entry point. The shell must never
+			// be cached — a stale shell references old content-hashed
+			// chunks and breaks hydration after every upgrade.
 			r.URL.Path = "/"
+			w.Header().Set("Cache-Control", "no-store")
 		} else if strings.HasPrefix(p, "_app/immutable/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if strings.HasSuffix(p, ".html") {
+			// Prerendered route shells reference content-hashed chunks:
+			// never let a browser reuse a stale shell (it would keep
+			// serving the previous release's UI until a hard refresh).
+			w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		} else {
+			// Remaining assets (version.json, favicon, ...): revalidate.
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		fileServer.ServeHTTP(w, r)
 	})

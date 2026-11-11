@@ -488,3 +488,82 @@ func TestClaimTokenRegeneration(t *testing.T) {
 		t.Fatalf("replay after claim: %d %v", rec.Code, decodeMap(t, rec))
 	}
 }
+
+// TestMFAReenrolmentAfterSkip covers the completion checklist's
+// "secure your account" path: after onboarding finished with MFA
+// skipped, the operator can start TOTP enrolment in place (setup and
+// verify are admitted while the instance is active with mfa_mode
+// "skipped"); once mfa_mode is "totp" enrolment closes again.
+func TestMFAReenrolmentAfterSkip(t *testing.T) {
+	h, st := newTestHandler(t)
+	ctx := context.Background()
+
+	token, _, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateClaimToken(ctx, auth.TokenHash(token), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
+		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
+	}
+	sess := cookieOf(rec)
+	sessHdr := map[string]string{"Cookie": sess.Name + "=" + sess.Value}
+
+	// Skip MFA: onboarding completes, session upgrades to full scope.
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",
+		`{"acknowledge_risk":true}`, sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mfa skip = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Re-enrolment from the completion checklist: setup is admitted while
+	// mfa_mode is "skipped".
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-enrolment setup = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A wrong code must not complete enrolment.
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/verify",
+		`{"code":"000000"}`, sessHdr)
+	if rec.Code != http.StatusUnauthorized || errCode(decodeMap(t, rec)) != "totp_invalid" {
+		t.Fatalf("bad code verify = %d: %v", rec.Code, decodeMap(t, rec))
+	}
+
+	// Fresh secret, then verify with a live code: enrolment completes
+	// without a state transition (the instance is already active).
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second setup = %d: %s", rec.Code, rec.Body.String())
+	}
+	secret := decodeMap(t, rec)["secret"].(string)
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/verify",
+		fmt.Sprintf(`{"code":%q}`, currentTOTP(t, secret)), sessHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-enrolment verify = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := decodeMap(t, rec)["recovery_codes"].([]any); !ok {
+		t.Fatalf("recovery codes missing: %v", decodeMap(t, rec))
+	}
+
+	// The instance stays active; the recorded decision is now TOTP.
+	state, err := st.InstanceState(ctx)
+	if err != nil || state.Status != store.StatusActive || state.MFAMode != "totp" {
+		t.Fatalf("state after re-enrolment: %+v err=%v", state, err)
+	}
+
+	// Enrolment is closed once TOTP is on; skip stays first-run-only too.
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/setup", "", sessHdr)
+	if rec.Code != http.StatusConflict || errCode(decodeMap(t, rec)) != "wrong_state" {
+		t.Fatalf("setup after totp = %d: %v", rec.Code, decodeMap(t, rec))
+	}
+	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",
+		`{"acknowledge_risk":true}`, sessHdr)
+	if rec.Code != http.StatusConflict || errCode(decodeMap(t, rec)) != "wrong_state" {
+		t.Fatalf("skip after totp = %d: %v", rec.Code, decodeMap(t, rec))
+	}
+}
