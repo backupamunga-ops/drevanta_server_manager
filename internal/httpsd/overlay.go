@@ -66,7 +66,11 @@ func LoadDomainOverlay(dir string) (DomainOverlay, error) {
 	return o, nil
 }
 
-// SaveDomainOverlay atomically writes the overlay (0644: no secrets).
+// SaveDomainOverlay atomically writes the overlay. The file MUST end up
+// 0644 (secret-free, readable by the proxy worker's user): both service
+// units run UMask=0027, so a plain 0644 argument would land as 0640 and
+// the worker's user could not open the file — provisioning silently
+// never started. The explicit Chmod pins the mode regardless of umask.
 // An empty domain removes the file.
 func SaveDomainOverlay(dir, domain string) error {
 	domain = NormalizeDomain(domain)
@@ -89,7 +93,15 @@ func SaveDomainOverlay(dir, domain string) error {
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write overlay: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return fmt.Errorf("chmod overlay: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace overlay: %w", err)
+	}
+	// Belt and braces: pin the final file too (e.g. if a previous
+	// umask-affected 0640 file was replaced).
+	return os.Chmod(path, 0o644)
 }
 
 // NormalizeDomain lowercases, trims spaces and one trailing dot.

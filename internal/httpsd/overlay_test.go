@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -229,5 +230,31 @@ func TestClearDomainSlot(t *testing.T) {
 	}
 	if m.servedCertForSNI("vpn.example.com") != nil {
 		t.Fatal("no domain certificate may be served after clearing")
+	}
+}
+
+// TestOverlayModeSurvivesUmask pins the production bug where both service
+// units run UMask=0027: a plain 0644 WriteFile argument lands as 0640 and
+// the httpsd worker's user (drevanta-https, not in the drevanta group)
+// could not read the overlay — provisioning never started and the apply
+// request died on its wait. SaveDomainOverlay must pin 0644 explicitly.
+func TestOverlayModeSurvivesUmask(t *testing.T) {
+	dir := t.TempDir()
+	old := syscall.Umask(0o027)
+	defer syscall.Umask(old)
+
+	if err := SaveDomainOverlay(dir, "vpn.example.com"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	info, err := os.Stat(OverlayPath(dir))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("overlay mode = %v, want 0644 (worker must be able to read it under UMask=0027)", info.Mode().Perm())
+	}
+	// The worker's read path (different user in production) succeeds.
+	if _, err := LoadDomainOverlay(dir); err != nil {
+		t.Fatalf("load: %v", err)
 	}
 }

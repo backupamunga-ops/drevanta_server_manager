@@ -4,6 +4,20 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.12] — domain provisioning actually starts: overlay readable across service users
+
+### Fixed
+- **The domain certificate never started provisioning** (the real cause
+  behind "could not store the domain request" follow-ups and the apply
+  timeout): both service units run `UMask=0027`, so the domain overlay
+  written by the daemon (user `drevanta`) with a plain 0644 argument
+  landed on disk as 0640 — and the httpsd worker (user `drevanta-https`)
+  could not open it ("domain overlay unreadable: permission denied" every
+  2s, apply request cut on its 60s wait). `SaveDomainOverlay` now pins
+  the file to 0644 with an explicit chmod, immune to the umask. The
+  overlay remains secret-free (just the domain name).
+- Regression test pins the mode under UMask=0027.
+
 ## [0.4.11] — interactive completion checklist + domain apply connection fix + fresh UI bundles
 
 ### Added
