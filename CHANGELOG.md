@@ -4,6 +4,34 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.8] — approved onboarding UI v6
+
+### Changed
+- **Onboarding rebuilt to the approved HTML prototype v6, token for
+  token**: one shared visual system across all six wizard steps —
+  the exact prototype palette (`--bg:#0b1417`, `--card:#142024`,
+  `--raised:#1a2b2e`, `--input:#0e191d`, `--line:#304348`,
+  `--accent:#83d9bf`, `--accent-deep:#0b2822`, `--danger:#f1aaa1`,
+  `--warn:#e2bb7e`), 436px card, prototype typography (650/750/850
+  font weights, 13px base size, 9px meta), and prototype spacing
+  (gap 11/7, 13px action margins, 10px small spaces).
+- **Connect-your-domain screen restructured to the prototype**: the
+  13px breathing space between the input field and the Verify DNS
+  button, a warning feedback bar plus a neutral raised instructions
+  panel with the 88px-label dnsrow table on DNS failure, and raised
+  panels with the dns-passed icon on DNS success and HTTPS state.
+- **Flow copy matches the approved prototype** ("Create your admin
+  account", "Scan and confirm", "Connect your domain", "You're all
+  set", …) with the same option cards, action rows and dividers.
+
+### Unchanged
+- **Functional logic byte-identical**: every handler, state machine
+  (`verifiedDomain`, monotonic `dnsSeq` stale guards, domain stage
+  flow), API contract and guard is untouched — svelte-check 0/0,
+  37/37 unit tests, full Go suite, production build green; the whole
+  flow re-driven end-to-end on a throwaway local daemon (real claim,
+  real TOTP, real DNS checks, real apply-failure fixture).
+
 ## [0.4.7] — onboarding polish: compact scale, prototype MFA screen, installer spacing
 
 ### Changed
