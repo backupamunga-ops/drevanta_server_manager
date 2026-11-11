@@ -1288,9 +1288,15 @@
         }
 
         /* ---------- topbar (outside the card, every step) ---------- */
+        /* Compact frame tuning: the shared shell carries the explicit 0.8x
+           values (432px card, 16px headings, 120px QR); the +10% zoom
+           requested after review lands the whole surface at ~0.88x of the
+           0.4.6 frame, uniformly on every step. Kept off the small-screen
+           breakpoint so phones keep their own spacing without overflow. */
         .obshell {
                 width: 100%;
                 max-width: 432px;
+                zoom: 1.1;
         }
 
         .otopbar {
@@ -2361,6 +2367,10 @@
         @media (max-width: 520px) {
                 .ob {
                         padding: 12px 10px;
+                }
+
+                .obshell {
+                        zoom: 1;
                 }
 
                 .obcard {

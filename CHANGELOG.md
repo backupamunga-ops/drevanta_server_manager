@@ -7,12 +7,14 @@ Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 ## [0.4.7] — onboarding polish: compact scale, prototype MFA screen, installer spacing
 
 ### Changed
-- **Onboarding UI scaled down ~20% around one shared compact frame**: the
-  brand topbar (with a live access-mode pill fed by the same
-  `/api/v1/access/status` the dashboard and sign-in page use) now sits
-  above the card on every step, and the card, typography, inputs,
-  buttons, QR and every wizard step share the reduced scale, so the
-  flow no longer looks zoomed in.
+- **Onboarding UI compact scale, tuned after review**: the brand topbar
+  (with a live access-mode pill fed by the same `/api/v1/access/status`
+  the dashboard and sign-in page use) now sits above the card on every
+  step, and the card, typography, inputs, buttons, QR and every wizard
+  step share one reduced frame — the explicit compact values carry the
+  review-time "-20%" pass and a uniform +10% zoom on the shared shell
+  lands the final surface at ~0.88x of the 0.4.6 frame (mobile keeps
+  its own unzoomed spacing), so the flow no longer looks zoomed in.
 - **MFA setup screen implements the approved prototype faithfully**:
   QR code beside the copy text, the setup key in a grouped
   copy-inside-the-field input (the copy button copies the ungrouped
