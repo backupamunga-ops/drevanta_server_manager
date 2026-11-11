@@ -1283,17 +1283,21 @@
                                                 <span>{domainStage === 'applying' ? 'Enabling and verifying HTTPS…' : 'Enable and verify HTTPS →'}</span>
                                         </button>
                                 {:else if dnsCheckResult && !dnsCheckResult.matches && !domainChecked && domainStage !== 'applied'}
-                                        <div class="odns-help" role="status">
+                                        <div class="ofeedback" role="status">
+                                                {domainMsg || dnsCheckResult.message || 'This domain does not currently point to your server.'}
+                                        </div>
+                                        <div class="opanel odns-instructions">
                                                 <strong>Domain not connected yet</strong>
-                                                <p>{domainMsg || dnsCheckResult.message || 'This domain does not currently point to your server.'}</p>
-                                                <p>At your domain's DNS provider, create or update the record below, then refresh verification.</p>
-                                                <div class="odns-record"><span>Type</span><code>A</code></div>
-                                                <div class="odns-record"><span>Host / Name</span><code>{dnsHostFor(domainInput.trim().toLowerCase())}</code></div>
-                                                <div class="odns-record"><span>Points to</span><code>{dnsCheckResult.expected?.join(', ') || serverIp || 'your server public IP'}</code></div>
-                                                <p>The host name depends on your DNS provider and zone. Remove conflicting records if needed. DNS updates may take time to propagate.</p>
-                                                <button class="obtn obtn--secondary" type="button" disabled={domainBusy || domainErr !== ''} onclick={submitDomainCheck}>
-                                                        ↻ Refresh verification
-                                                </button>
+                                                <p class="odns-instructions__lead">At your domain's DNS provider, create or update the record below, then refresh verification.</p>
+                                                <div class="odns-row"><span>Type</span><strong>A</strong></div>
+                                                <div class="odns-row"><span>Host / Name</span><strong class="mono">{dnsHostFor(domainInput.trim().toLowerCase())}</strong></div>
+                                                <div class="odns-row"><span>Points to</span><strong class="mono">{dnsCheckResult.expected?.join(', ') || serverIp || 'your server public IP'}</strong></div>
+                                                <p class="odns-instructions__note">The host name depends on your DNS provider and zone. Remove conflicting records if needed. DNS updates may take time.</p>
+                                                <div class="oactions">
+                                                        <button class="obtn obtn--secondary" type="button" disabled={domainBusy || domainErr !== ''} onclick={submitDomainCheck}>
+                                                                ↻ Refresh verification
+                                                        </button>
+                                                </div>
                                         </div>
                                 {/if}
                                 {#if domainError}
@@ -1317,7 +1321,7 @@
                         {/if}
                 {:else if step === 'done'}
                         <section class="odone">
-                                <div class="osuccess__badge odone__icon" aria-hidden="true">
+                                <div class="osuccess__badge" aria-hidden="true">
                                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
                                                 <path d="M4.5 12.5l4.6 4.6L19.5 6.8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
                                         </svg>
@@ -1357,7 +1361,7 @@
                 --dim: #819a9b;
                 --accent: #83d9bf;
                 --accent-deep: #0b2822;
-                --accent-glow: rgba(131, 217, 191, 0.14);
+                --accent-glow: rgba(131, 217, 191, 0.094);
                 --danger: #f1aaa1;
                 --warn: #e2bb7e;
                 --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
@@ -1454,14 +1458,14 @@
                 border-radius: 7px;
                 color: var(--accent-deep);
                 font-size: 15px;
-                font-weight: 800;
+                font-weight: 850;
                 line-height: 1;
         }
 
         .obrand__word {
                 margin: 0;
                 font-size: 15px;
-                font-weight: 700;
+                font-weight: 750;
                 letter-spacing: -0.45px;
                 color: var(--text);
                 white-space: nowrap;
@@ -1516,7 +1520,7 @@
                 border: 1px solid var(--line);
                 background: var(--card);
                 border-radius: 14px;
-                box-shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+                box-shadow: 0 18px 55px rgba(0, 0, 0, 0.25);
                 animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
         }
 
@@ -1537,10 +1541,10 @@
                 align-items: center;
                 justify-content: space-between;
                 gap: 10px;
-                color: #91aaa9;
+                color: #9cb4b2;
                 font-size: 9px;
-                font-weight: 700;
-                letter-spacing: 1.15px;
+                font-weight: 750;
+                letter-spacing: 1.1px;
                 text-transform: uppercase;
                 margin-bottom: 12px;
         }
@@ -1579,11 +1583,10 @@
                 font-size: 11.5px;
                 line-height: 1.5;
                 color: var(--muted);
-                max-width: 52ch;
         }
 
         .ointro--tight h2 {
-                margin-bottom: 0;
+                margin-bottom: 5px;
         }
 
         .oloading {
@@ -1616,13 +1619,13 @@
         /* ---------- fields ---------- */
         .oform {
                 display: grid;
-                gap: 10px;
+                gap: 11px;
         }
 
         .ofield {
                 display: grid;
                 gap: 5px;
-                margin-top: 2px;
+                margin-top: 0;
         }
 
         .olabel-row {
@@ -1634,7 +1637,7 @@
 
         .olabel {
                 font-size: 11px;
-                font-weight: 600;
+                font-weight: 650;
                 color: #d1dfda;
         }
 
@@ -1667,7 +1670,6 @@
 
         .oinput--mono {
                 font-family: var(--mono);
-                letter-spacing: 0.02em;
         }
 
         .oinput:focus {
@@ -1749,7 +1751,13 @@
                 align-items: flex-start;
                 font-size: 11px;
                 color: var(--danger);
-                margin: 1px 0 0;
+                margin: 0;
+        }
+
+        /* Standalone errors (not inside a field grid) sit 5px under the
+           preceding block, as in the prototype (.error margin-top). */
+        .obcard > .oerr {
+                margin-top: 5px;
         }
 
         .oerr svg {
@@ -1765,7 +1773,7 @@
         .ometer {
                 display: flex;
                 gap: 4px;
-                margin-top: 3px;
+                margin-top: 8px;
         }
 
         .ometer__bar {
@@ -1781,12 +1789,13 @@
                 align-items: center;
                 justify-content: space-between;
                 gap: 10px;
-                font-size: 10.5px;
-                color: var(--dim);
+                margin-top: 6px;
+                font-size: 11px;
+                color: var(--muted);
         }
 
         .ostrength {
-                font-weight: 600;
+                font-weight: 400;
         }
 
         /* ---------- buttons ---------- */
@@ -1797,12 +1806,12 @@
                 align-items: center;
                 justify-content: center;
                 gap: 8px;
-                padding: 8px 12px;
+                padding: 8px 10px;
                 border: 1px solid var(--accent);
                 background: var(--accent);
                 color: #0b2923;
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 750;
                 border-radius: 8px;
                 transition: background 0.15s, transform 0.15s, border-color 0.15s;
         }
@@ -1867,7 +1876,7 @@
                 padding: 3px 0;
                 color: var(--accent);
                 font-size: 12px;
-                font-weight: 600;
+                font-weight: 650;
         }
 
         .olinkbtn:hover {
@@ -1876,8 +1885,20 @@
 
         .oactions {
                 display: grid;
-                gap: 9px;
+                gap: 7px;
                 margin-top: 13px;
+        }
+
+        /* Bare buttons that follow a field/check/choice block get the
+           prototype's .actions margin-top (13px) — e.g. Verify DNS. */
+        .ofield + .obtn,
+        .ocheck-row + .obtn,
+        .ochoice + .obtn {
+                margin-top: 13px;
+        }
+
+        .oform > .obtn {
+                margin-top: 2px;
         }
 
         /* ---------- token chip (v6 panel.token) ---------- */
@@ -1900,8 +1921,8 @@
 
         .otoken-row__label {
                 font-size: 11px;
-                font-weight: 600;
-                color: #d8e4df;
+                font-weight: 700;
+                color: var(--text);
                 white-space: nowrap;
         }
 
@@ -1912,9 +1933,8 @@
                 text-overflow: ellipsis;
                 white-space: nowrap;
                 font-family: var(--mono);
-                font-size: 10.5px;
-                letter-spacing: 0.04em;
-                color: #9cb4b2;
+                font-size: 11px;
+                color: var(--muted);
         }
 
         .otoken-row__action {
@@ -1924,8 +1944,8 @@
                 border: 0;
                 padding: 3px 0;
                 color: var(--accent);
-                font-size: 11px;
-                font-weight: 600;
+                font-size: 12px;
+                font-weight: 650;
         }
 
         .otoken-row__action:hover {
@@ -1951,17 +1971,17 @@
 
         .opanel__head strong {
                 font-size: 12px;
-                color: #e1ece8;
+                color: var(--text);
         }
 
         .otag {
-                font-size: 10px;
-                font-weight: 600;
+                font-size: 11px;
+                font-weight: 400;
                 color: var(--accent);
         }
 
         .otag--dim {
-                color: var(--dim);
+                color: var(--muted);
         }
 
         /* ---------- MFA: QR + manual secret ---------- */
@@ -1998,7 +2018,7 @@
         .oqr-copy strong {
                 display: block;
                 font-size: 12px;
-                color: #e1ece8;
+                color: var(--text);
         }
 
         .oqr-copy > p {
@@ -2017,8 +2037,8 @@
         .omfa-help summary {
                 color: var(--accent);
                 cursor: pointer;
-                font-weight: 600;
-                font-size: 11px;
+                font-weight: 650;
+                font-size: 12px;
         }
 
         .omfa-help p {
@@ -2040,16 +2060,15 @@
                 background: var(--input);
                 border: 1px solid var(--line-hi);
                 border-radius: 8px;
-                margin-top: 5px;
+                margin-top: 10px;
         }
 
         .okey-field code {
                 flex: 1 1 auto;
                 min-width: 0;
                 font-family: var(--mono);
-                font-size: 11.5px;
-                letter-spacing: 0.08em;
-                color: #cfe3dd;
+                font-size: 12px;
+                color: var(--text);
                 overflow-wrap: anywhere;
         }
 
@@ -2059,8 +2078,8 @@
                 border: 0;
                 padding: 6px 8px;
                 color: var(--accent);
-                font-size: 11px;
-                font-weight: 700;
+                font-size: 12px;
+                font-weight: 650;
                 border-radius: 6px;
         }
 
@@ -2134,12 +2153,12 @@
                 align-items: center;
                 justify-content: space-between;
                 gap: 10px;
-                margin-top: 12px;
+                margin-top: 10px;
         }
 
         .oskip-row__text {
                 font-size: 11px;
-                color: var(--dim);
+                color: var(--muted);
         }
 
         .owarn {
@@ -2153,7 +2172,7 @@
 
         .owarn__title {
                 margin: 0;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 700;
                 color: #ffe0ce;
         }
@@ -2161,7 +2180,7 @@
         .owarn__list {
                 margin: 8px 0;
                 padding-left: 16px;
-                font-size: 11.5px;
+                font-size: 13px;
                 line-height: 1.55;
         }
 
@@ -2171,15 +2190,15 @@
 
         .owarn__note {
                 margin: 0;
-                font-size: 10.5px;
+                font-size: 11px;
                 line-height: 1.5;
-                color: #c9a98f;
+                color: var(--muted);
         }
 
         .owarn__actions {
                 display: grid;
-                gap: 9px;
-                margin-top: 11px;
+                gap: 7px;
+                margin-top: 13px;
         }
 
         .ocheck-row {
@@ -2241,7 +2260,7 @@
         /* ---------- address choices (v6) ---------- */
         .ochoice {
                 display: grid;
-                gap: 8px;
+                gap: 7px;
                 margin: 13px 0;
         }
 
@@ -2298,7 +2317,7 @@
                 display: block;
                 font-size: 12px;
                 font-weight: 700;
-                color: #e1ece8;
+                color: var(--text);
         }
 
         .ochoice__sub {
@@ -2315,19 +2334,19 @@
                 margin: 14px 0 0;
         }
 
-        /* ---------- DNS verification (v6 panels) ---------- */
+        /* ---------- DNS verification (v6: feedback bar + panel, as prototype) ---------- */
         .odns-success {
                 display: flex;
                 gap: 9px;
                 align-items: center;
-                background: #19342d;
-                color: #c4e8da;
-                border: 1px solid #397460;
-                border-radius: 9px;
+                background: var(--raised);
+                color: #bdebdc;
+                border: 1px solid #315052;
+                border-radius: 10px;
                 padding: 11px;
                 font-size: 12px;
                 line-height: 1.5;
-                margin-top: 12px;
+                margin-top: 10px;
         }
 
         .odns-success strong {
@@ -2335,9 +2354,9 @@
         }
 
         .odns-success__icon {
-                flex: 0 0 19px;
-                width: 19px;
-                height: 19px;
+                flex: 0 0 21px;
+                width: 21px;
+                height: 21px;
                 display: grid;
                 place-items: center;
                 border: 1.5px solid var(--accent);
@@ -2346,65 +2365,74 @@
         }
 
         .odns-success + .obtn {
-                margin-top: 9px;
+                margin-top: 13px;
         }
 
-        .odns-help {
-                background: #29251d;
-                border: 1px solid #665338;
-                border-radius: 9px;
-                padding: 12px;
-                margin-top: 12px;
-                color: #e3d1af;
+        .ofeedback {
+                padding: 10px 12px;
+                margin-top: 11px;
+                background: #352c22;
+                border-radius: 8px;
+                color: #f1d6aa;
                 font-size: 12px;
+                line-height: 1.5;
         }
 
-        .odns-help strong {
+        .odns-instructions {
+                margin-top: 10px;
+        }
+
+        .odns-instructions strong {
                 display: block;
                 font-size: 12px;
                 color: #f0d7a7;
         }
 
-        .odns-help p {
-                margin: 7px 0;
+        .odns-instructions__lead {
+                margin: 7px 0 12px;
+                font-size: 11px;
                 line-height: 1.5;
+                color: var(--muted);
         }
 
-        .odns-record {
+        .odns-row {
                 display: flex;
-                justify-content: space-between;
-                align-items: baseline;
+                align-items: center;
                 gap: 12px;
-                border-top: 1px solid #594b38;
                 padding: 8px 0;
-                font-size: 11px;
+                border-bottom: 1px solid var(--line);
+                font-size: 12px;
         }
 
-        .odns-record span {
-                color: #b3a382;
-                flex: 0 0 auto;
+        .odns-row span {
+                color: var(--muted);
+                min-width: 88px;
         }
 
-        .odns-record code {
-                font-family: var(--mono);
+        .odns-row strong {
+                font-weight: 650;
                 overflow-wrap: anywhere;
-                text-align: right;
-                font-size: 11px;
-                color: #ead9b6;
         }
 
-        .odns-help .obtn--secondary {
-                margin-top: 4px;
+        .mono {
+                font-family: var(--mono);
+        }
+
+        .odns-instructions__note {
+                margin: 11px 0 0;
+                font-size: 11px;
+                line-height: 1.5;
+                color: var(--muted);
         }
 
         .oapplied {
                 background: var(--raised);
                 border: 1px solid #315052;
                 border-radius: 10px;
-                padding: 12px;
-                margin-top: 12px;
+                padding: 11px;
+                margin-top: 10px;
                 font-size: 12px;
-                color: #c4e8da;
+                color: var(--muted);
         }
 
         .oapplied__title {
@@ -2418,18 +2446,19 @@
         }
 
         .oapplied p {
-                margin: 0 0 11px;
+                margin: 7px 0 11px;
+                font-size: 11px;
                 line-height: 1.5;
         }
 
         .oapplied strong {
-                color: var(--accent);
+                color: var(--text);
         }
 
         .odomain-exit {
                 display: grid;
-                gap: 9px;
-                margin-top: 13px;
+                gap: 7px;
+                margin-top: 0;
                 text-align: center;
         }
 
@@ -2476,10 +2505,6 @@
                 margin-top: 6px;
         }
 
-        .odone__icon {
-                margin-top: 18px;
-        }
-
         .odone h2 {
                 margin: 0 0 5px;
                 font-size: 19px;
@@ -2488,13 +2513,13 @@
         }
 
         .odone > p {
-                margin: 0 0 6px;
+                margin: 0 0 10px;
                 font-size: 11.5px;
                 color: var(--muted);
         }
 
         .odone__panel {
-                margin-top: 14px;
+                margin-top: 10px;
                 text-align: left;
         }
 
@@ -2511,14 +2536,14 @@
         }
 
         .orow__label {
-                color: var(--dim);
+                color: var(--muted);
                 font-size: 11px;
         }
 
         .orow__value {
                 font-family: var(--mono);
                 font-size: 11px;
-                color: #d8e4df;
+                color: var(--text);
                 overflow-wrap: anywhere;
                 text-align: right;
         }
@@ -2588,7 +2613,11 @@
         /* ---------- responsive (v4/v6 compact refinements) ---------- */
         @media (max-width: 490px) {
                 .ob {
-                        padding: 15px 12px 14px;
+                        padding: 15px 12px 18px;
+                }
+
+                .otopbar {
+                        margin-bottom: 11px;
                 }
 
                 .obcard {
@@ -2628,8 +2657,8 @@
                         padding: 18px 22px;
                 }
 
-                .ofield {
-                        margin-top: 1px;
+                .oform {
+                        gap: 9px;
                 }
 
                 .ointro p {
