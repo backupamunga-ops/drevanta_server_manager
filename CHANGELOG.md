@@ -4,6 +4,43 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.9] — onboarding fix round: button color, paste-link autofill, domain apply on fresh installs
+
+### Fixed
+- **Domain apply failed on fresh installs** ("could not store the
+  domain request"): the daemon unit's `ProtectSystem=strict` made
+  `/var/lib/drevanta-access` read-only and the installer never created
+  it, so the secret-free domain overlay could not be written and the
+  DNS-verified domain could not be applied. The unit now declares
+  `StateDirectory=drevanta drevanta-access` (created, owned by the
+  service user, writable) and the installer pre-creates the directory.
+- **Active onboarding buttons rendered white text instead of the
+  prototype's near-black**: a `.ob button { color: inherit }` reset
+  out-specified every button's own color rule; the reset now sets font
+  only.
+- **Pasting the setup link into an already-open onboarding page did
+  nothing until a reload**: the token is now adopted on `hashchange`
+  (claim step only), so pasting or clicking `…onboarding#token=…`
+  autofills immediately.
+
+### Changed
+- **MFA manual entry**: the setup secret is masked by default with a
+  Reveal/Hide toggle; Copy sits inline inside the field and always
+  copies the real secret.
+- **MFA instructions below the QR**: "In your authenticator app, tap
+  Add account…" and the app-store links moved under the QR row,
+  toggled by "How does this work?".
+- **DNS instructions panel**: Copy buttons on the Host / Name and
+  Points to rows.
+- **Completion screen is a checklist**: admin credentials, MFA state
+  (secured or a "secure your account in Settings" hint) and the
+  domain/IP configuration, with live cpu/memory/disk stats from the
+  dashboard metrics endpoint, an "Updated at" timestamp and an explicit
+  "Proceed to dashboard" button (auto-redirect removed).
+- **Installer success screens**: the onboarding URL is emitted as an
+  OSC 8 terminal hyperlink (clickable in Windows Terminal and other
+  supporting terminals; plain-text fallback elsewhere).
+
 ## [0.4.8] — approved onboarding UI v6
 
 ### Changed
