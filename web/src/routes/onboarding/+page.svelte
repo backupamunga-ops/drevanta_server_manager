@@ -150,16 +150,10 @@
         const strengthColor = $derived(LEVEL_COLORS[pwLevel]);
         const otpCode = $derived(otpDigits.join(''));
         // Grouped 4-4-4 display of the base32 secret; the copy button copies
-        // the ungrouped value the authenticator expects.
+        // the ungrouped value the authenticator expects. This is the only
+        // presentation: the whole field is collapsed until Reveal, and the
+        // input always holds the real secret while it is visible.
         const secretDisplay = $derived(totpSecret.replace(/(.{4})/g, '$1 ').trim());
-        // Masked presentation: the same 4-character grouping as the real
-        // secret with dots instead of characters, so the field keeps its
-        // size whether hidden or revealed.
-        const secretMaskedDisplay = $derived.by(() => {
-                if (!totpSecret) return '';
-                const groups = Math.ceil(totpSecret.length / 4);
-                return new Array(groups).fill('••••').join(' ');
-        });
         // The copyable Host / Name value in the DNS instructions panel.
         // (Points to is derived below, after serverIp is declared.)
         const dnsHostValue = $derived(dnsHostFor(domainInput.trim().toLowerCase()));
@@ -1244,17 +1238,18 @@
                                                 <button
                                                         type="button"
                                                         class="okey-field__copy"
-                                                        aria-pressed={secretRevealed}
-                                                        aria-controls="setup-key"
+                                                        aria-expanded={secretRevealed}
+                                                        aria-controls="setup-key-field"
                                                         onclick={() => (secretRevealed = !secretRevealed)}
                                                 >
                                                         {secretRevealed ? 'Hide' : 'Reveal'}
                                                 </button>
                                         </div>
-                                        <div class="okey-field">
-                                                <!-- Real (readonly) text input: Reveal/Hide swaps the WHOLE
-                                                     field content between the grouped bullet mask and the full
-                                                     plaintext secret; Copy still copies the raw secret. -->
+                                        <div class="okey-field" id="setup-key-field" hidden={!secretRevealed}>
+                                                <!-- Same disclosure pattern as "How does this work?": the
+                                                     whole field is collapsed until Reveal, and while visible
+                                                     the readonly input always holds the full plaintext
+                                                     secret; Copy still copies the raw (ungrouped) secret. -->
                                                 <input
                                                         id="setup-key"
                                                         type="text"
@@ -1263,8 +1258,7 @@
                                                         autocomplete="off"
                                                         spellcheck="false"
                                                         aria-labelledby="setup-key-label"
-                                                        class:revealed={secretRevealed}
-                                                        value={secretRevealed ? secretDisplay : secretMaskedDisplay}
+                                                        value={secretDisplay}
                                                 />
                                                 <button
                                                         type="button"
@@ -2343,14 +2337,20 @@
                 border-color: var(--accent);
         }
 
-        /* The secret is a real (readonly) text input so Reveal/Hide swaps the
-           whole field content (mask <-> plaintext); no clipping of the
-           revealed secret for the standard 32-char base32 group display. */
-        .okey-field__secret {
+        /* The secret is a real (readonly) text input, visible only while the
+           section is revealed. It always shows the grouped plaintext (32
+           base32 chars + 7 spaces = 39 chars): at 12px that overflows the
+           field by a few px and ellipsis-clips the last group, so 11px is
+           the size that always shows the WHOLE block. The `input` part
+           matters: `.ob input { font: inherit }` compiles to (0,2,1) and
+           would beat a plain class rule (0,2,0), silently forcing 13px
+           Inter over this mono/11px styling — with the element qualifier
+           this rule is (0,3,1) and wins outright. */
+        .okey-field input.okey-field__secret {
                 flex: 1 1 auto;
                 min-width: 0;
                 font-family: var(--mono);
-                font-size: 12px;
+                font-size: 11px;
                 color: var(--text);
                 background: none;
                 border: 0;
@@ -2359,14 +2359,6 @@
                 white-space: nowrap;
                 overflow: hidden;
                 text-overflow: ellipsis;
-        }
-
-        /* Revealed: the grouped plaintext (32 base32 chars + 7 spaces = 39
-           chars) overflows the field by a few px at 12px, which ellipsis-clips
-           the last group. The secret length is fixed by totpSecretN=20 bytes
-           -> 32 chars, so 11px always shows the WHOLE block when revealed. */
-        .okey-field__secret.revealed {
-                font-size: 11px;
         }
 
         .okey-field__copy {

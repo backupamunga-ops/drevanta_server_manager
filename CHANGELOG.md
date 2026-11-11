@@ -4,6 +4,26 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.13] — the secret section is a real disclosure: collapsed until Reveal
+
+### Fixed
+- **"Secret (manual entry)" now behaves exactly like "How does this
+  work?"** — it hides and reveals the whole section, not the characters.
+  The field is collapsed by default (only the label row and the Reveal
+  button show). Reveal shows the entire field: a real readonly text input
+  holding the full grouped plaintext, with the Copy button inside and the
+  shared focus-ring styling; Hide collapses the whole section again. The
+  toggle flips Reveal↔Hide and exposes aria-expanded/aria-controls, same
+  as the help disclosure. Re-entering the screen (checklist re-entry,
+  reload) always starts collapsed. The previous build had misread this as
+  a character-level mask swap (dots ↔ plaintext inside an always-visible
+  field), which was indistinguishable from the outside.
+- **Specificity fix**: the page-wide `.ob input { font: inherit }` reset
+  compiles to (0,2,1) and silently beat plain class rules (0,2,0) — the
+  secret input's mono/11px styling never applied (it rendered 13px Inter,
+  ellipsis-clipping the revealed secret). The secret rule now compiles to
+  (0,3,1) and wins outright.
+
 ## [0.4.12] — domain provisioning actually starts: overlay readable across service users
 
 ### Fixed
