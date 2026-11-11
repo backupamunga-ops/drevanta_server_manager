@@ -4,6 +4,18 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.10] — onboarding: manual-entry secret is a real text field
+
+### Changed
+- **Secret (manual entry) is now a real (readonly) text input field** and
+  Reveal/Hide swaps the WHOLE field content: hidden shows the grouped
+  bullet mask (`•••• •••• …`), revealed shows the entire base32 secret —
+  previously the revealed value was ellipsis-clipped inside a static
+  `<code>` block. The revealed size is deterministic: the daemon issues a
+  fixed 160-bit secret (32 base32 chars, 39 chars grouped), which fits the
+  field at 11px, so nothing is ever cut off. Copy still copies the raw
+  ungrouped secret in both states. UI-only; no functional logic changed.
+
 ## [0.4.9] — onboarding fix round: button color, paste-link autofill, domain apply on fresh installs
 
 ### Fixed
