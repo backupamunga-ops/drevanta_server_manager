@@ -1172,7 +1172,20 @@
                                                 </button>
                                         </div>
                                         <div class="okey-field">
-                                                <code id="setup-key" aria-labelledby="setup-key-label">{secretRevealed ? secretDisplay : secretMaskedDisplay}</code>
+                                                <!-- Real (readonly) text input: Reveal/Hide swaps the WHOLE
+                                                     field content between the grouped bullet mask and the full
+                                                     plaintext secret; Copy still copies the raw secret. -->
+                                                <input
+                                                        id="setup-key"
+                                                        type="text"
+                                                        class="okey-field__secret"
+                                                        readonly
+                                                        autocomplete="off"
+                                                        spellcheck="false"
+                                                        aria-labelledby="setup-key-label"
+                                                        class:revealed={secretRevealed}
+                                                        value={secretRevealed ? secretDisplay : secretMaskedDisplay}
+                                                />
                                                 <button
                                                         type="button"
                                                         class="okey-field__copy"
@@ -2225,15 +2238,30 @@
                 margin-top: 10px;
         }
 
-        .okey-field code {
+        /* The secret is a real (readonly) text input so Reveal/Hide swaps the
+           whole field content (mask <-> plaintext); no clipping of the
+           revealed secret for the standard 32-char base32 group display. */
+        .okey-field__secret {
                 flex: 1 1 auto;
                 min-width: 0;
                 font-family: var(--mono);
                 font-size: 12px;
                 color: var(--text);
+                background: none;
+                border: 0;
+                padding: 0;
+                outline: none;
                 white-space: nowrap;
                 overflow: hidden;
                 text-overflow: ellipsis;
+        }
+
+        /* Revealed: the grouped plaintext (32 base32 chars + 7 spaces = 39
+           chars) overflows the field by a few px at 12px, which ellipsis-clips
+           the last group. The secret length is fixed by totpSecretN=20 bytes
+           -> 32 chars, so 11px always shows the WHOLE block when revealed. */
+        .okey-field__secret.revealed {
+                font-size: 11px;
         }
 
         .okey-field__copy {
