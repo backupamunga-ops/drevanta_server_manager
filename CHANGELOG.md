@@ -4,6 +4,33 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.7] — onboarding polish: compact scale, prototype MFA screen, installer spacing
+
+### Changed
+- **Onboarding UI scaled down ~20% around one shared compact frame**: the
+  brand topbar (with a live access-mode pill fed by the same
+  `/api/v1/access/status` the dashboard and sign-in page use) now sits
+  above the card on every step, and the card, typography, inputs,
+  buttons, QR and every wizard step share the reduced scale, so the
+  flow no longer looks zoomed in.
+- **MFA setup screen implements the approved prototype faithfully**:
+  QR code beside the copy text, the setup key in a grouped
+  copy-inside-the-field input (the copy button copies the ungrouped
+  secret), six single-digit code boxes with auto-advance, paste
+  support, arrow/backspace navigation, a red invalid state with the
+  shake animation and an inline "That code didn't work…" message, and
+  a centered "MFA enabled" success view before the recovery codes.
+  Same endpoints and flow: no change to enrolment, skip, or the
+  audited risk acknowledgement.
+- **Installer success screen spacing**: the "OPEN DREVANTA IN YOUR
+  BROWSER" link block is framed by light horizontal rules with
+  breathing room so the single action stands out in terminal output
+  (pinned by the installer harness).
+
+### Fixed
+- `QR_SIZE` lowered to 120 to match the rendered size, keeping the
+  embedded SVG and the `.oqr svg` CSS rule in sync.
+
 ## [0.4.6] — access-status readability fix
 
 ### Fixed
