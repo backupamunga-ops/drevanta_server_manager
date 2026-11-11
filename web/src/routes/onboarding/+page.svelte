@@ -40,9 +40,9 @@
         const DEFAULT_TOKEN_HINT = 'Paste the whole token or the setup link.';
         const INCOMPLETE_TOKEN_HINT = 'That token looks incomplete — check you copied the whole setup link.';
 
-        // Meter / strength colours indexed by scorePassword() level, exactly
-        // as in the approved prototype (1 danger, 2 warn, 3 mint, 4 accent).
-        const LEVEL_COLORS = ['', 'var(--danger)', 'var(--warn)', '#8fe6c0', 'var(--accent)'] as const;
+        // Meter / strength colours indexed by scorePassword() level, in the
+        // approved v6 palette (1 danger, 2 warn, 3 soft mint, 4 mint).
+        const LEVEL_COLORS = ['', '#df8b83', '#e2bb7e', '#9ddbb9', '#83d9bf'] as const;
 
         let step = $state<Step>('loading');
         let busy = $state(false);
@@ -84,6 +84,7 @@
         let otpShake = $state(false);
         let otpEls = $state<(HTMLInputElement | null)[]>([]);
         let mfaDone = $state(false);
+        let mfaSkipped = $state(false);
         let copyDone = $state(false);
         let copyTimer: ReturnType<typeof setTimeout> | undefined;
         let continueEl = $state<HTMLButtonElement | null>(null);
@@ -99,14 +100,26 @@
         let skipConfirm = $state(false);
 
         // --- access address (custom domain, optional) ----------------------
+        // Approved v6 presentation: the address choice and the domain setup
+        // are two screens. The backend contract is unchanged — DNS
+        // verification (check) and HTTPS provisioning (apply) remain the
+        // same two calls as before.
         let domainChoice = $state<'ip' | 'domain'>('ip');
+        let domainScreen = $state(false);
         let domainInput = $state('');
         let domainTouched = $state(false);
         let domainBusy = $state(false);
         let domainStage = $state<'input' | 'checking' | 'applying' | 'applied'>('input');
         let domainMsg = $state('');
-        let domainApplied = $state('');
         let domainError = $state('');
+        // The domain that passed DNS verification. HTTPS provisioning is
+        // permitted for THIS value only; editing the input invalidates it.
+        let verifiedDomain = $state('');
+        let dnsCheckResult = $state<DomainCheckResult | null>(null);
+        // Monotonic DNS request sequence: an answer that arrives after the
+        // input changed must never mark, message or un-busy the new domain.
+        let dnsSeq = 0;
+        let domainApplied = $state('');
 
         // Element refs for focus management.
         let tokenEl = $state<HTMLInputElement | null>(null);
@@ -130,12 +143,52 @@
         // the ungrouped value the authenticator expects.
         const secretDisplay = $derived(totpSecret.replace(/(.{4})/g, '$1 ').trim());
 
-        // --- trusted access pill (topbar, all steps) ---------------------------
+        const domainErr = $derived(domainHint(domainInput));
+        // The verification counts only while the input still IS the verified
+        // domain — a global boolean would leak a pass to an edited domain.
+        const domainChecked = $derived(
+                verifiedDomain !== '' && verifiedDomain === domainInput.trim().toLowerCase()
+        );
+
+        // --- trusted access pill + server IP (topbar, all steps) -----------
         // Same source of truth as the dashboard and the sign-in page: the
         // secret-free /api/v1/access/status. Nothing is guessed from the URL.
-        let access = $state<{ mode: 'https' | 'private' } | null>(null);
+        let access = $state<{ mode: 'https' | 'private'; https?: { host?: string } | null } | null>(null);
         const accessPill = $derived(access ? accessLabel(access) : 'checking access…');
         const accessTitle = $derived(accessLabelTitle(access));
+        // The server IP on the address screen comes exclusively from the
+        // trusted access status; it is never hardcoded and never taken from
+        // the browser URL.
+        const serverIp = $derived.by(() => {
+                const host = access?.https?.host ?? '';
+                return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) ? host : '';
+        });
+
+        // Approved v6 step meta ("Initial setup · Step 1 of 4", ...).
+        const stepMeta = $derived.by(() => {
+                switch (step) {
+                        case 'claim':
+                                return { label: 'Initial setup', right: 'Step 1 of 4' };
+                        case 'mfa-setup':
+                                return { label: 'Account security', right: 'Step 2 of 4' };
+                        case 'recovery':
+                                return { label: 'Account recovery', right: 'Step 3 of 4' };
+                        case 'domain':
+                                return domainScreen
+                                        ? { label: 'Connect domain', right: 'Optional setup' }
+                                        : { label: 'Server access', right: 'Step 4 of 4' };
+                        default:
+                                return null; // loading and done carry no meta row
+                }
+        });
+
+        // Completion screen facts (v6 panel). The address is the trusted
+        // applied domain or the trusted server IP — never a guessed value.
+        const finalAddress = $derived.by(() => {
+                if (domainApplied) return 'https://' + domainApplied;
+                return serverIp ? 'https://' + serverIp : '';
+        });
+        const finalMfa = $derived(mfaDone ? 'MFA enabled' : 'MFA skipped');
 
         $effect(() => {
                 if (statusChecked) return;
@@ -145,7 +198,7 @@
 
         $effect(() => {
                 fetchAccessStatus()
-                        .then((a) => (access = { mode: a.mode }))
+                        .then((a) => (access = { mode: a.mode, https: a.https ?? null }))
                         .catch(() => (access = null));
         });
 
@@ -237,7 +290,7 @@
 
         // --- token state transitions -----------------------------------------
 
-        /** Show the approved green "Setup token loaded" chip. */
+        /** Show the approved green "Setup token detected" chip. */
         function adoptToken(value: string, origin: string) {
                 token = value;
                 tokenOrigin = origin;
@@ -366,6 +419,7 @@
         async function beginMfaSetup() {
                 stepError = '';
                 busy = true;
+                mfaSkipped = false;
                 try {
                         const res = await postJSON<MfaSetup>('/api/v1/onboarding/mfa/setup', {});
                         totpSecret = res.secret;
@@ -524,6 +578,7 @@
                         await skipMfa();
                         skipShown = false;
                         skipConfirm = false;
+                        mfaSkipped = true;
                         step = 'domain';
                         announce('Multi-factor skipped for now. You can enable it later in Account Security.');
                 } catch (err) {
@@ -541,50 +596,96 @@
                 setTimeout(() => goto('/', { replaceState: true }), 1200);
         }
 
-        const domainErr = $derived(domainHint(domainInput));
+        /** Reset every DNS/HTTPS state — used when the domain input changes. */
+        function resetDomainFlow() {
+                dnsSeq++;
+                verifiedDomain = '';
+                dnsCheckResult = null;
+                domainMsg = '';
+                domainError = '';
+                domainStage = 'input';
+                domainApplied = '';
+        }
+
+        function onDomainInput(e: Event) {
+                domainInput = (e.currentTarget as HTMLInputElement).value;
+                // A different domain invalidates the previous verification
+                // immediately: success panel, instructions and HTTPS readiness.
+                resetDomainFlow();
+        }
+
+        /** DNS Host/Name field for the instructions panel (approved v6 rule). */
+        function dnsHostFor(domain: string): string {
+                const labels = domain.split('.');
+                return labels.length > 2 ? labels.slice(0, -2).join('.') : '@';
+        }
 
         /** Verify DNS points at this VPS (no changes made). */
         async function submitDomainCheck() {
                 domainTouched = true;
+                if (domainErr !== '') return;
+                const requested = domainInput.trim().toLowerCase();
+                const seq = ++dnsSeq;
                 domainError = '';
                 domainMsg = '';
-                if (domainErr !== '') return;
+                dnsCheckResult = null;
+                verifiedDomain = '';
                 domainBusy = true;
                 domainStage = 'checking';
                 try {
-                        const res: DomainCheckResult = await checkDomain(domainInput.trim());
-                        domainMsg = res.message;
+                        const res: DomainCheckResult = await checkDomain(requested);
+                        // Stale-response guard: only an answer for the domain
+                        // still in the input may update any state.
+                        if (seq !== dnsSeq || domainInput.trim().toLowerCase() !== requested) return;
+                        dnsCheckResult = res;
+                        if (res.matches) {
+                                verifiedDomain = requested;
+                                domainMsg = '';
+                        } else {
+                                verifiedDomain = '';
+                                domainMsg = res.message;
+                        }
                         domainStage = 'input';
                 } catch (err) {
+                        if (seq !== dnsSeq || domainInput.trim().toLowerCase() !== requested) return;
+                        verifiedDomain = '';
+                        dnsCheckResult = null;
                         domainError = err instanceof ApiError ? err.message : String(err);
                         domainStage = 'input';
                 } finally {
-                        domainBusy = false;
+                        // A stale request never clears the newer request's busy flag.
+                        if (seq === dnsSeq) domainBusy = false;
                 }
         }
 
         /**
-         * Apply the domain: the backend verifies DNS, the certificate is
-         * issued and the full route is verified BEFORE success. Any failure
-         * leaves the working server-IP HTTPS untouched.
+         * Apply the VERIFIED domain: the backend re-verifies DNS, the
+         * certificate is issued and the full route is verified BEFORE
+         * success. Any failure leaves the working server-IP HTTPS untouched.
          */
         async function submitDomainApply() {
                 domainTouched = true;
+                if (domainErr !== '' || !domainChecked || domainBusy) return;
+                const requested = verifiedDomain;
+                const seq = ++dnsSeq;
                 domainError = '';
                 domainMsg = '';
-                if (domainErr !== '') return;
                 domainBusy = true;
                 domainStage = 'applying';
                 try {
-                        const res = await applyDomain(domainInput.trim());
+                        const res = await applyDomain(requested);
+                        if (seq !== dnsSeq) return;
                         domainApplied = res.domain;
                         domainStage = 'applied';
                         announce('Custom domain verified. You can open the console at https://' + res.domain + '/');
                 } catch (err) {
+                        if (seq !== dnsSeq) return;
+                        // The domain stays DNS-verified: the success panel remains
+                        // so provisioning can be retried or skipped.
                         domainError = err instanceof ApiError ? err.message : String(err);
                         domainStage = 'input';
                 } finally {
-                        domainBusy = false;
+                        if (seq === dnsSeq) domainBusy = false;
                 }
         }
 
@@ -635,25 +736,8 @@
         <div class="obshell">
                 <header class="otopbar">
                         <div class="obrand">
-                                <span class="obrand__mark" aria-hidden="true">
-                                        <svg
-                                                width="15"
-                                                height="15"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                stroke-width="1.7"
-                                                stroke-linecap="round"
-                                                stroke-linejoin="round"
-                                        >
-                                                <path d="M12 3l7.5 3.2v5.6c0 4.5-3.1 8.4-7.5 10.2-4.4-1.8-7.5-5.7-7.5-10.2V6.2L12 3z" />
-                                                <path d="M9.2 12.2l2 2 3.6-3.9" />
-                                        </svg>
-                                </span>
-                                <div>
-                                        <h1>Drevanta</h1>
-                                        <p>Private server console</p>
-                                </div>
+                                <span class="obrand__mark" aria-hidden="true">D</span>
+                                <h1 class="obrand__word">drevanta<i>.</i></h1>
                         </div>
                         <span
                                 class="opill"
@@ -680,29 +764,33 @@
                 {#if step === 'loading'}
                         <p class="oloading">loading onboarding state…</p>
                 {:else if step === 'claim'}
-                        <form class="oform oform--claim" novalidate onsubmit={submitClaim}>
+                        <div class="ometa-top"><span>{stepMeta?.label}</span><span>{stepMeta?.right}</span></div>
+                        <section class="ointro">
+                                <h2>Create your admin account</h2>
+                                <p>Set up the credentials you'll use to manage this server.</p>
+                        </section>
+                        <form class="oform" novalidate onsubmit={submitClaim}>
                                 {#if tokenMode === 'chip'}
-                                                                                <!-- locked compact token row: loaded ≠ verified; the
-                                                                                     backend checks the single-use token only on claim -->
-                                                                                <div class="otoken-row" role="group" aria-label="Setup token loaded">
-                                                                                        <span class="otoken-row__badge" aria-hidden="true">
-                                                                                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
-                                                                                                        <path d="M20 6 9 17l-5-5" />
-                                                                                                </svg>
-                                                                                        </span>
-                                                                                        <span class="otoken-row__label">Token loaded</span>
-                                                                                        <span class="otoken-row__sep" aria-hidden="true">·</span>
-                                                                                        <code class="otoken-row__mask">{chipMasked}</code>
-                                                                                        <button
-                                                                                                class="otoken-row__action"
-                                                                                                type="button"
-                                                                                                onclick={changeToken}
-                                                                                                aria-label="Enter a different claim token"
-                                                                                        >
-                                                                                                Change
-                                                                                        </button>
-                                                                                </div>
-                                                                        {:else}
+                                        <!-- locked compact token row: loaded ≠ verified; the
+                                             backend checks the single-use token only on claim -->
+                                        <div class="otoken-row" role="group" aria-label="Setup token loaded">
+                                                <span class="otoken-row__badge" aria-hidden="true">
+                                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+                                                                <path d="M20 6 9 17l-5-5" />
+                                                        </svg>
+                                                </span>
+                                                <span class="otoken-row__label">Setup token detected</span>
+                                                <code class="otoken-row__mask">{chipMasked}</code>
+                                                <button
+                                                        class="otoken-row__action"
+                                                        type="button"
+                                                        onclick={changeToken}
+                                                        aria-label="Enter a different claim token"
+                                                >
+                                                        Change
+                                                </button>
+                                        </div>
+                                {:else}
                                         <div
                                                 class="ofield"
                                                 class:has-error={showTokenErr || showTokenReject}
@@ -754,16 +842,17 @@
                                 {/if}
 
                                 <div class="ofield" class:has-error={userTouched && userErr !== ''}>
-                                        <label class="olabel" for="username">Admin username</label>
+                                        <label class="olabel" for="username">Administrator username</label>
                                         <input
                                                 class="oinput"
                                                 id="username"
                                                 name="username"
                                                 type="text"
-                                                placeholder="e.g. rootadmin"
+                                                placeholder="e.g. admin"
                                                 autocomplete="username"
                                                 autocapitalize="off"
                                                 spellcheck="false"
+                                                maxlength="32"
                                                 aria-describedby="user-err"
                                                 aria-invalid={userTouched && userErr !== ''}
                                                 bind:value={username}
@@ -784,10 +873,10 @@
                                                         id="password"
                                                         name="password"
                                                         type={showPw ? 'text' : 'password'}
-                                                        placeholder="At least 12 characters"
+                                                        placeholder="Create a secure password"
                                                         autocomplete="new-password"
                                                         maxlength={PASSWORD_MAX}
-                                                        aria-describedby="pw-err"
+                                                        aria-describedby="pw-err pw-strength"
                                                         aria-invalid={pwTouched && pwErr !== ''}
                                                         bind:value={password}
                                                         bind:this={passwordEl}
@@ -808,8 +897,8 @@
                                                 >
                                                         <svg
                                                                 class="icon-show"
-                                                                width="17"
-                                                                height="17"
+                                                                width="16"
+                                                                height="16"
                                                                 viewBox="0 0 24 24"
                                                                 fill="none"
                                                                 stroke="currentColor"
@@ -822,8 +911,8 @@
                                                         </svg>
                                                         <svg
                                                                 class="icon-hide"
-                                                                width="17"
-                                                                height="17"
+                                                                width="16"
+                                                                height="16"
                                                                 viewBox="0 0 24 24"
                                                                 fill="none"
                                                                 stroke="currentColor"
@@ -839,13 +928,14 @@
                                                 </button>
                                         </div>
 
-                                        <div class="ometer-row">
-                                                <div class="ometer" aria-hidden="true">
-                                                        <span class="ometer__bar" class:on={pwLevel >= 1} style:background={pwLevel >= 1 ? strengthColor : ''}></span>
-                                                        <span class="ometer__bar" class:on={pwLevel >= 2} style:background={pwLevel >= 2 ? strengthColor : ''}></span>
-                                                        <span class="ometer__bar" class:on={pwLevel >= 3} style:background={pwLevel >= 3 ? strengthColor : ''}></span>
-                                                        <span class="ometer__bar" class:on={pwLevel >= 4} style:background={pwLevel >= 4 ? strengthColor : ''}></span>
-                                                </div>
+                                        <div class="ometer" aria-hidden="true">
+                                                <span class="ometer__bar" class:on={pwLevel >= 1} style:background={pwLevel >= 1 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 2} style:background={pwLevel >= 2 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 3} style:background={pwLevel >= 3 ? strengthColor : ''}></span>
+                                                <span class="ometer__bar" class:on={pwLevel >= 4} style:background={pwLevel >= 4 ? strengthColor : ''}></span>
+                                        </div>
+                                        <div class="ostrength-row" id="pw-strength">
+                                                <span>Password strength</span>
                                                 <span class="ostrength" aria-live="polite" style:color={pwLevel > 0 ? strengthColor : ''}>{strengthLabel}</span>
                                         </div>
 
@@ -883,11 +973,11 @@
                                                         aria-pressed={showPw2}
                                                         onclick={() => (showPw2 = !showPw2)}
                                                 >
-                                                        <svg class="icon-show" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                        <svg class="icon-show" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                                                 <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z" />
                                                                 <circle cx="12" cy="12" r="3" />
                                                         </svg>
-                                                        <svg class="icon-hide" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                                        <svg class="icon-hide" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                                                                 <path d="M3 3l18 18" />
                                                                 <path d="M10.6 10.6a3 3 0 0 0 4.2 4.2" />
                                                                 <path d="M9.9 5.2A10.6 10.6 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.5 4.3" />
@@ -900,10 +990,11 @@
 
                                 <button class="obtn" type="submit" disabled={busy} class:is-loading={busy} aria-busy={busy}>
                                         <span class="obtn__spinner" aria-hidden="true"></span>
-                                        <span>{busy ? 'Creating administrator…' : 'Create administrator account'}</span>
+                                        <span>{busy ? 'Creating administrator…' : 'Create administrator →'}</span>
                                 </button>
                         </form>
 
+                        <div class="odivider"></div>
                         <div class="ometa">
                                 <span>argon2id</span><span class="dot">·</span>
                                 <span>single-use setup token</span>
@@ -911,7 +1002,7 @@
 
                         <details class="odisclosure">
                                 <summary>
-                                        Where do I find the claim token?
+                                        Where do I find my setup token?
                                         <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                                 <path d="M6 9l6 6 6-6" />
                                         </svg>
@@ -927,6 +1018,7 @@
                                 </p>
                         </details>
                 {:else if step === 'mfa-setup'}
+                        <div class="ometa-top"><span>{stepMeta?.label}</span><span>{stepMeta?.right}</span></div>
                         {#if mfaDone}
                                 <section class="osuccess" role="status">
                                         <div class="osuccess__badge" aria-hidden="true">
@@ -939,31 +1031,51 @@
                                                 You'll need your authenticator app the next time you sign in to the Drevanta
                                                 console. Next: save your recovery codes.
                                         </p>
-                                        <button class="obtn obtn--slim" type="button" bind:this={continueEl} onclick={() => (step = 'recovery')}>
-                                                Continue
+                                        <button class="obtn" type="button" bind:this={continueEl} onclick={() => (step = 'recovery')}>
+                                                Continue →
                                         </button>
                                 </section>
                         {:else if totpSecret}
-                                <section class="ointro">
-                                        <h2>Set up two-factor authentication</h2>
-                                        <p>Add Drevanta to your authenticator app, then enter the 6-digit code to confirm.</p>
+                                <section class="ointro ointro--tight">
+                                        <h2>Scan and confirm</h2>
                                 </section>
 
-                                <div class="oqr-row">
-                                        <div class="oqr" aria-hidden="true">{@html qrSvg}</div>
-                                        <div class="oqr-copy">
-                                                <p>Scan the QR code with your authenticator app. If you can't scan it, enter the setup key manually.</p>
-                                                <label class="olabel" for="setup-key">Setup key (manual entry)</label>
-                                                <div class="okey-field">
-                                                        <code id="setup-key">{secretDisplay}</code>
-                                                        <button type="button" class="okey-field__copy" class:done={copyDone} onclick={copySecret} aria-label="Copy setup key">
-                                                                {copyDone ? 'Copied' : 'Copy'}
-                                                        </button>
+                                <div class="opanel">
+                                        <div class="opanel__head">
+                                                <strong>Authenticator setup</strong>
+                                                <span class="otag">Recommended</span>
+                                        </div>
+                                        <div class="oqr-row">
+                                                <div class="oqr" aria-hidden="true">{@html qrSvg}</div>
+                                                <div class="oqr-copy">
+                                                        <strong>Scan with your app</strong>
+                                                        <p>Google Authenticator, Microsoft Authenticator, or another TOTP app.</p>
+                                                        <details class="omfa-help">
+                                                                <summary>How does this work?</summary>
+                                                                <p>In your authenticator app, tap <strong>Add account</strong>, scan the QR code, then enter the six-digit code shown in the app.</p>
+                                                                <p>Need an authenticator app? Get Google Authenticator from the <a href="https://play.google.com/store/apps/details?id=com.google.android.apps.authenticator2" target="_blank" rel="noopener noreferrer">Google Play Store</a> or the <a href="https://apps.apple.com/app/google-authenticator/id388497605" target="_blank" rel="noopener noreferrer">Apple App Store</a>.</p>
+                                                        </details>
                                                 </div>
+                                        </div>
+                                        <div class="odivider"></div>
+                                        <div class="olabel-row">
+                                                <span class="olabel" id="setup-key-label">Secret (manual entry)</span>
+                                                <button
+                                                        type="button"
+                                                        class="okey-field__copy"
+                                                        class:done={copyDone}
+                                                        onclick={copySecret}
+                                                        aria-label="Copy setup key"
+                                                >
+                                                        {copyDone ? 'Copied' : 'Copy'}
+                                                </button>
+                                        </div>
+                                        <div class="okey-field">
+                                                <code id="setup-key" aria-labelledby="setup-key-label">{secretDisplay}</code>
                                         </div>
                                 </div>
 
-                                <form class="oform oform--otp" novalidate onsubmit={submitTotp}>
+                                <form class="oform" novalidate onsubmit={submitTotp}>
                                         <div class="ofield">
                                                 <label class="olabel" for="otp0">6-digit code</label>
                                                 <div class="ootp" class:invalid={otpInvalid} class:shake={otpShake}>
@@ -1013,9 +1125,9 @@
                                                 <p class="owarn__title">Skip multi-factor authentication?</p>
                                                 <ul class="owarn__list">
                                                         <li>Anyone with your password could sign in as you.</li>
-                                                        <li>A stolen password would be enough to take over this server.</li>
+                                                        <li>A stolen password could be enough to take over this server.</li>
                                                 </ul>
-                                                <p class="owarn__note">You can enable MFA at any time under Account Security. This choice is recorded in the audit log.</p>
+                                                <p class="owarn__note">You can enable MFA later under Account Security. This choice is recorded in the audit log.</p>
                                                 <label class="ocheck-row ocheck-row--tight">
                                                         <input type="checkbox" bind:checked={skipConfirm} />
                                                         <span>I understand the risk and want to skip MFA for now.</span>
@@ -1032,146 +1144,196 @@
                                         </div>
                                 {/if}
                         {:else}
-                        <section class="ointro">
-                                <h2>Multi-factor setup</h2>
-                                <p>{stepError || 'The authenticator setup could not be prepared.'}</p>
-                        </section>
-                        <div class="oactions">
-                                <button class="obtn" type="button" onclick={beginMfaSetup} disabled={busy} class:is-loading={busy} aria-busy={busy}>
-                                        <span class="obtn__spinner" aria-hidden="true"></span>
-                                        <span>{busy ? 'Preparing…' : 'Try again'}</span>
-                                </button>
-                        </div>
+                                <section class="ointro">
+                                        <h2>Multi-factor setup</h2>
+                                        <p>{stepError || 'The authenticator setup could not be prepared.'}</p>
+                                </section>
+                                <div class="oactions">
+                                        <button class="obtn" type="button" onclick={beginMfaSetup} disabled={busy} class:is-loading={busy} aria-busy={busy}>
+                                                <span class="obtn__spinner" aria-hidden="true"></span>
+                                                <span>{busy ? 'Preparing…' : 'Try again'}</span>
+                                        </button>
+                                </div>
                         {/if}
                 {:else if step === 'recovery'}
+                        <div class="ometa-top"><span>{stepMeta?.label}</span><span>{stepMeta?.right}</span></div>
                         <section class="ointro">
                                 <h2>Save your recovery codes</h2>
                                 <p>
-                                        Each code works exactly once at sign-in if your authenticator is unavailable. They are
-                                        shown <strong>only this once</strong>; the server stores just their hashes.
+                                        Each code works once if your authenticator is unavailable. These are shown
+                                        <strong>only once</strong>; Drevanta stores only their hashes.
                                 </p>
                         </section>
-                        <div class="ocodes-grid">
-                                {#each recoveryCodes as c (c)}
-                                        <span class="ocode-chip">{c}</span>
-                                {/each}
+                        <div class="opanel">
+                                <div class="opanel__head">
+                                        <strong>Recovery codes</strong>
+                                        <span class="otag otag--dim">{recoveryCodes.length} one-time codes</span>
+                                </div>
+                                <div class="ocodegrid">
+                                        {#each recoveryCodes as c, i (c)}
+                                                <div class="ocode">
+                                                        <small>{String(i + 1).padStart(2, '0')}</small>
+                                                        <code>{c}</code>
+                                                </div>
+                                        {/each}
+                                </div>
+                                <button class="obtn obtn--secondary" type="button" onclick={copyCodes}>Copy all codes</button>
                         </div>
-                        <button class="obtn obtn--secondary" type="button" onclick={copyCodes}>Copy all codes</button>
                         <label class="ocheck-row">
                                 <input type="checkbox" bind:checked={codesSaved} />
                                 <span>I have stored these codes somewhere safe (password manager or printed copy).</span>
                         </label>
                         <button class="obtn" type="button" onclick={finishRecovery} disabled={!codesSaved}>
-                                Continue
+                                Continue →
                         </button>
                 {:else if step === 'domain'}
-                        <section class="ointro">
-                                <h2>Choose your access address</h2>
-                                <p>
-                                        The console is live on this server's IP address with a trusted certificate. You can
-                                        keep it, or use your own domain instead — both stay available.
-                                </p>
-                        </section>
-                        <div class="ochoice" role="radiogroup" aria-label="Access address">
-                                <button
-                                        class="ochoice__opt"
-                                        class:is-active={domainChoice === 'ip'}
-                                        type="button"
-                                        role="radio"
-                                        aria-checked={domainChoice === 'ip'}
-                                        onclick={() => (domainChoice = 'ip')}
-                                >
-                                        <span class="ochoice__title">Continue with the server IP</span>
-                                        <span class="ochoice__sub">Ready now — no extra setup.</span>
+                        {#if !domainScreen}
+                                <div class="ometa-top"><span>{stepMeta?.label}</span><span>{stepMeta?.right}</span></div>
+                                <section class="ointro">
+                                        <h2>Choose your server address</h2>
+                                        <p>Your console is already secured. Keep your server IP or connect a domain you own.</p>
+                                </section>
+                                <div class="ochoice" role="radiogroup" aria-label="Server address">
+                                        <button
+                                                class="ochoice__opt"
+                                                class:is-active={domainChoice === 'ip'}
+                                                type="button"
+                                                role="radio"
+                                                aria-checked={domainChoice === 'ip'}
+                                                onclick={() => (domainChoice = 'ip')}
+                                        >
+                                                <span class="oradio" aria-hidden="true"></span>
+                                                <span class="ochoice__text">
+                                                        <span class="ochoice__title">Continue with the server IP</span>
+                                                        <span class="ochoice__sub">{serverIp ? serverIp + ' · ' : ''}Ready now — no extra setup</span>
+                                                </span>
+                                        </button>
+                                        <button
+                                                class="ochoice__opt"
+                                                class:is-active={domainChoice === 'domain'}
+                                                type="button"
+                                                role="radio"
+                                                aria-checked={domainChoice === 'domain'}
+                                                onclick={() => (domainChoice = 'domain')}
+                                        >
+                                                <span class="oradio" aria-hidden="true"></span>
+                                                <span class="ochoice__text">
+                                                        <span class="ochoice__title">I have a domain</span>
+                                                        <span class="ochoice__sub">Connect your own domain or subdomain</span>
+                                                </span>
+                                        </button>
+                                </div>
+                                <button class="obtn" type="button" onclick={() => (domainChoice === 'ip' ? proceedWithIp() : (domainScreen = true))}>
+                                        {domainChoice === 'ip' ? 'Proceed with the server IP →' : 'Set up your domain →'}
                                 </button>
-                                <button
-                                        class="ochoice__opt"
-                                        class:is-active={domainChoice === 'domain'}
-                                        type="button"
-                                        role="radio"
-                                        aria-checked={domainChoice === 'domain'}
-                                        onclick={() => (domainChoice = 'domain')}
-                                >
-                                        <span class="ochoice__title">I have a domain</span>
-                                        <span class="ochoice__sub">We verify DNS and issue a trusted certificate.</span>
-                                </button>
-                        </div>
-                        {#if domainChoice === 'domain'}
-                                <div class="ofield">
-                                        <div class="olabel-row">
-                                                <label class="olabel" for="domain-input">Your domain</label>
-                                                <span class="olabel-note">optional</span>
-                                        </div>
+                                <p class="osubtle-center">You can change your address later in Settings.</p>
+                        {:else}
+                                <div class="ometa-top"><span>{stepMeta?.label}</span><span>{stepMeta?.right}</span></div>
+                                <section class="ointro">
+                                        <h2>Connect your domain</h2>
+                                        <p>Enter a domain you own. We'll check whether its DNS points to your server before setting up HTTPS.</p>
+                                </section>
+                                <div class="ofield" class:has-error={domainTouched && domainErr !== ''}>
+                                        <label class="olabel" for="domain-input">Domain or subdomain</label>
                                         <input
                                                 class="oinput oinput--mono"
                                                 id="domain-input"
                                                 type="text"
-                                                placeholder="vpn.example.com"
+                                                placeholder="panel.example.com"
                                                 autocomplete="off"
                                                 autocapitalize="off"
                                                 spellcheck="false"
-                                                aria-describedby="domain-hint domain-msg domain-err"
+                                                aria-describedby="domain-hint domain-err"
                                                 aria-invalid={domainTouched && domainErr !== ''}
-                                                bind:value={domainInput}
+                                                value={domainInput}
+                                                oninput={onDomainInput}
                                                 onblur={() => (domainTouched = true)}
                                         />
                                         <p class="oerr" id="domain-hint" hidden={!(domainTouched && domainErr !== '')}>{domainErr}</p>
                                 </div>
                                 {#if domainStage !== 'applied'}
-                                        <div class="oactions oactions--tight">
-                                                <button
-                                                        class="obtn"
-                                                        type="button"
-                                                        disabled={busy || domainErr !== '' || domainStage !== 'input'}
-                                                        class:is-loading={busy}
-                                                        aria-busy={busy}
-                                                        onclick={submitDomainApply}
-                                                >
-                                                        <span class="obtn__spinner" aria-hidden="true"></span>
-                                                        <span>
-                                                                {#if domainStage === 'applying'}
-                                                                        Verifying DNS, issuing certificate…
-                                                                {:else}
-                                                                        Verify DNS and enable HTTPS for this domain
-                                                                {/if}
-                                                        </span>
-                                                </button>
-                                                <button class="obtn obtn--secondary" type="button" disabled={busy || domainErr !== ''} onclick={submitDomainCheck}>
-                                                        Check DNS only
+                                        <button
+                                                class="obtn"
+                                                type="button"
+                                                disabled={domainBusy || domainErr !== '' || domainChecked}
+                                                class:is-loading={domainBusy && domainStage === 'checking'}
+                                                aria-busy={domainBusy}
+                                                onclick={submitDomainCheck}
+                                        >
+                                                <span class="obtn__spinner" aria-hidden="true"></span>
+                                                <span>{domainStage === 'checking' ? 'Checking DNS…' : domainChecked ? 'DNS verified' : 'Verify DNS →'}</span>
+                                        </button>
+                                {/if}
+                                {#if domainChecked && domainStage !== 'applied'}
+                                        <div class="odns-success" role="status">
+                                                <span class="odns-success__icon" aria-hidden="true">
+                                                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                </span>
+                                                <span><strong>DNS check passed.</strong> Your domain points to this server.</span>
+                                        </div>
+                                        <button
+                                                class="obtn"
+                                                type="button"
+                                                disabled={domainBusy}
+                                                class:is-loading={domainBusy && domainStage === 'applying'}
+                                                aria-busy={domainBusy}
+                                                onclick={submitDomainApply}
+                                        >
+                                                <span class="obtn__spinner" aria-hidden="true"></span>
+                                                <span>{domainStage === 'applying' ? 'Enabling and verifying HTTPS…' : 'Enable and verify HTTPS →'}</span>
+                                        </button>
+                                {:else if dnsCheckResult && !dnsCheckResult.matches && !domainChecked && domainStage !== 'applied'}
+                                        <div class="odns-help" role="status">
+                                                <strong>Domain not connected yet</strong>
+                                                <p>{domainMsg || dnsCheckResult.message || 'This domain does not currently point to your server.'}</p>
+                                                <p>At your domain's DNS provider, create or update the record below, then refresh verification.</p>
+                                                <div class="odns-record"><span>Type</span><code>A</code></div>
+                                                <div class="odns-record"><span>Host / Name</span><code>{dnsHostFor(domainInput.trim().toLowerCase())}</code></div>
+                                                <div class="odns-record"><span>Points to</span><code>{dnsCheckResult.expected?.join(', ') || serverIp || 'your server public IP'}</code></div>
+                                                <p>The host name depends on your DNS provider and zone. Remove conflicting records if needed. DNS updates may take time to propagate.</p>
+                                                <button class="obtn obtn--secondary" type="button" disabled={domainBusy || domainErr !== ''} onclick={submitDomainCheck}>
+                                                        ↻ Refresh verification
                                                 </button>
                                         </div>
-                                {/if}
-                                {#if domainMsg}
-                                        <p class="ohint" id="domain-msg">{domainMsg}</p>
                                 {/if}
                                 {#if domainError}
                                         <p class="oerr" id="domain-err" role="alert">{domainError}</p>
                                 {/if}
                                 {#if domainStage === 'applied'}
                                         <div class="oapplied" role="status">
-                                                <p>
-                                                        <strong>https://{domainApplied}</strong> is verified and serving. The server-IP address keeps
-                                                        working too. You can change the domain later in Settings.
+                                                <p class="oapplied__title">
+                                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+                                                        Domain secured with HTTPS
                                                 </p>
-                                                <button class="obtn" type="button" onclick={finishDomain}>Open the console</button>
+                                                <p><strong>https://{domainApplied}</strong> is verified and serving. Your original IP address remains available.</p>
+                                                <button class="obtn" type="button" onclick={finishDomain}>Continue →</button>
                                         </div>
                                 {/if}
+                                <div class="odivider"></div>
+                                <div class="odomain-exit">
+                                        <button class="obtn obtn--secondary" type="button" onclick={proceedWithIp}>Skip — keep using the server IP</button>
+                                        <button class="olinkbtn" type="button" onclick={() => (domainScreen = false)}>← Back to address choices</button>
+                                </div>
                         {/if}
-                        <div class="oactions oactions--tight">
-                                <button class="obtn obtn--secondary" type="button" onclick={proceedWithIp}>
-                                        {domainChoice === 'ip' ? 'Continue with the server IP' : 'Skip — keep using the server IP'}
-                                </button>
-                        </div>
-                        <div class="ometa">
-                                <span>no account with any external service is required</span>
-                        </div>
                 {:else if step === 'done'}
                         <section class="odone">
-                                <div class="odone__icon" aria-hidden="true">
-                                        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                <div class="osuccess__badge odone__icon" aria-hidden="true">
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                                                <path d="M4.5 12.5l4.6 4.6L19.5 6.8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                                        </svg>
                                 </div>
                                 <h2>You're all set</h2>
                                 <p>Onboarding is complete. Opening the dashboard…</p>
+                                <div class="opanel odone__panel">
+                                        <div class="orow">
+                                                <span class="orow__label">Access</span>
+                                                <code class="orow__value">{finalAddress || accessPill}</code>
+                                        </div>
+                                        <div class="orow">
+                                                <span class="orow__label">Account security</span>
+                                                <span class="orow__value">{finalMfa}</span>
+                                        </div>
+                                </div>
                         </section>
                 {/if}
                 </main>
@@ -1179,54 +1341,40 @@
 </div>
 
 <style>
-        /* Design tokens from the approved prototype, scoped to this page so
-           the dashboard's global palette is untouched. */
+        /* Approved v6 design tokens, scoped to this page so the dashboard's
+           global palette is untouched. Values come from the approved HTML v6
+           prototype (teal-tinted dark theme, mint accent). */
         .ob {
-                --line: #1c2530;
-                --line-hi: #28323f;
-                --line-soft: #161e27;
-                --text: #e7eef5;
-                --muted: #93a1b0;
-                --dim: #61707f;
-                --accent: #3ddc97;
-                --accent-glow: rgba(61, 220, 151, 0.14);
-                --danger: #ff6b6b;
-                --warn: #ffb454;
+                --bg: #0b1417;
+                --card: #142024;
+                --raised: #1a2b2e;
+                --input: #0e191d;
+                --line: #304348;
+                --line-hi: #3b5052;
+                --line-soft: #243437;
+                --text: #ecf4f1;
+                --muted: #a0b3b4;
+                --dim: #819a9b;
+                --accent: #83d9bf;
+                --accent-deep: #0b2822;
+                --accent-glow: rgba(131, 217, 191, 0.14);
+                --danger: #f1aaa1;
+                --warn: #e2bb7e;
                 --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
                 min-height: 100vh;
                 display: grid;
                 place-items: center;
-                padding: 18px 14px;
-                background: #06080b;
+                padding: 22px 12px 18px;
+                background: radial-gradient(ellipse at 50% 0%, #19312e 0%, #0b1417 56%);
                 color: var(--text);
-                font-size: 12.5px;
-                line-height: 1.5;
+                font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+                font-size: 13px;
+                line-height: 1.55;
         }
 
-        /* Ambient green glow + subtle grid, as fixed overlays like the
-           prototype's body::before/::after. Pointer events pass through. */
-        .ob::before {
-                content: '';
-                position: fixed;
-                inset: 0;
-                pointer-events: none;
-                background:
-                        radial-gradient(900px 520px at 50% -12%, rgba(61, 220, 151, 0.11), transparent 62%),
-                        radial-gradient(700px 420px at 92% 108%, rgba(84, 132, 255, 0.07), transparent 60%);
-        }
-
-        .ob::after {
-                content: '';
-                position: fixed;
-                inset: 0;
-                pointer-events: none;
-                background-image:
-                        linear-gradient(to right, rgba(255, 255, 255, 0.028) 1px, transparent 1px),
-                        linear-gradient(to bottom, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
-                background-size: 56px 56px;
-                -webkit-mask-image: radial-gradient(circle at 50% 32%, #000 0%, transparent 72%);
-                mask-image: radial-gradient(circle at 50% 32%, #000 0%, transparent 72%);
+        .ob ::selection {
+                background: rgba(131, 217, 191, 0.28);
         }
 
         .sr-only {
@@ -1242,90 +1390,109 @@
         }
 
         /* As in the prototype: the hidden attribute must always win over
-           component display values (.oerr uses display:flex, the hint rows
-           are plain blocks) so untouched error paragraphs truly vanish. */
+           component display values (.oerr uses flex, panels are blocks) so
+           untouched error paragraphs truly vanish. */
         .ob [hidden] {
                 display: none !important;
         }
 
-        /* ---------- card ---------- */
-        .obcard {
-                position: relative;
-                width: 100%;
-                max-width: 432px;
-                padding: 16px 18px 15px;
-                border-radius: 14px;
-                border: 1px solid var(--line);
-                background:
-                        radial-gradient(120% 100% at 50% 0%, rgba(61, 220, 151, 0.055), transparent 56%),
-                        linear-gradient(180deg, #0d1319 0%, #0a0e13 100%);
-                box-shadow:
-                        0 1px 0 rgba(255, 255, 255, 0.045) inset,
-                        0 40px 90px -32px rgba(0, 0, 0, 0.95),
-                        0 0 0 1px rgba(0, 0, 0, 0.4);
-                animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        .ob button,
+        .ob input {
+                font: inherit;
+                color: inherit;
         }
 
-        .obcard::before {
-                content: '';
-                position: absolute;
-                left: 14px;
-                right: 14px;
-                top: 0;
-                height: 1px;
-                background: linear-gradient(90deg, transparent, rgba(61, 220, 151, 0.55), transparent);
+        .ob button {
+                cursor: pointer;
         }
 
-        @keyframes rise {
-                from {
-                        opacity: 0;
-                        transform: translateY(12px);
-                }
-                to {
-                        opacity: 1;
-                        transform: none;
-                }
+        .ob button:disabled {
+                cursor: not-allowed;
+                opacity: 0.48;
+                transform: none;
         }
 
-        /* ---------- topbar (outside the card, every step) ---------- */
-        /* Compact frame tuning: the shared shell carries the explicit 0.8x
-           values (432px card, 16px headings, 120px QR); the +10% zoom
-           requested after review lands the whole surface at ~0.88x of the
-           0.4.6 frame, uniformly on every step. Kept off the small-screen
-           breakpoint so phones keep their own spacing without overflow. */
+        /* Visible keyboard focus everywhere, as in the approved prototype. */
+        .ob button:focus-visible,
+        .ob input:focus-visible,
+        .ob summary:focus-visible,
+        .ob a:focus-visible {
+                outline: 2px solid var(--accent);
+                outline-offset: 3px;
+        }
+
         .obshell {
                 width: 100%;
-                max-width: 432px;
-                zoom: 1.1;
+                max-width: 436px;
         }
 
+        /* ---------- header: centered brand + trusted access pill ---------- */
         .otopbar {
+                display: grid;
+                grid-template-columns: 1fr auto 1fr;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 13px;
+        }
+
+        .obrand {
+                grid-column: 2;
                 display: flex;
                 align-items: center;
-                justify-content: space-between;
-                gap: 10px;
-                margin-bottom: 12px;
+                justify-content: center;
+                gap: 7px;
+                min-width: 0;
         }
 
+        .obrand__mark {
+                width: 25px;
+                height: 25px;
+                flex: 0 0 auto;
+                display: grid;
+                place-items: center;
+                background: var(--accent);
+                border-radius: 7px;
+                color: var(--accent-deep);
+                font-size: 15px;
+                font-weight: 800;
+                line-height: 1;
+        }
+
+        .obrand__word {
+                margin: 0;
+                font-size: 15px;
+                font-weight: 700;
+                letter-spacing: -0.45px;
+                color: var(--text);
+                white-space: nowrap;
+        }
+
+        .obrand__word i {
+                color: var(--accent);
+                font-style: normal;
+        }
+
+        /* Trusted access chip — same data as the dashboard, v6-tinted. */
         .opill {
+                grid-column: 3;
+                justify-self: end;
                 display: inline-flex;
                 align-items: center;
                 gap: 6px;
-                flex: 0 0 auto;
                 font-family: var(--mono);
                 font-size: 10px;
                 letter-spacing: 0.02em;
                 color: var(--muted);
                 border: 1px solid var(--line);
-                background: #0a0e13;
+                background: var(--input);
                 border-radius: 999px;
                 padding: 3px 9px;
                 white-space: nowrap;
         }
 
         .opill__dot {
-                width: 5px;
-                height: 5px;
+                width: 6px;
+                height: 6px;
                 border-radius: 50%;
                 background: var(--dim);
         }
@@ -1337,59 +1504,86 @@
 
         .opill.is-private .opill__dot {
                 background: var(--warn);
-                box-shadow: 0 0 0 2.5px rgba(255, 180, 84, 0.16);
+                box-shadow: 0 0 0 2.5px rgba(226, 187, 126, 0.16);
         }
 
-        .obrand {
+        /* ---------- card ---------- */
+        .obcard {
+                position: relative;
+                width: 100%;
+                max-width: 436px;
+                padding: 21px 23px;
+                border: 1px solid var(--line);
+                background: var(--card);
+                border-radius: 14px;
+                box-shadow: 0 18px 55px rgba(0, 0, 0, 0.28);
+                animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        @keyframes rise {
+                from {
+                        opacity: 0;
+                        transform: translateY(10px);
+                }
+                to {
+                        opacity: 1;
+                        transform: none;
+                }
+        }
+
+        /* ---------- step meta (v6: label · Step N of 4) ---------- */
+        .ometa-top {
                 display: flex;
                 align-items: center;
+                justify-content: space-between;
                 gap: 10px;
-                min-width: 0;
-        }
-
-        .obrand__mark {
-                width: 31px;
-                height: 31px;
-                flex: 0 0 auto;
-                border-radius: 9px;
-                display: grid;
-                place-items: center;
-                color: var(--accent);
-                background: linear-gradient(160deg, rgba(61, 220, 151, 0.24), rgba(61, 220, 151, 0.05));
-                border: 1px solid rgba(61, 220, 151, 0.28);
-                box-shadow: 0 0 26px -8px rgba(61, 220, 151, 0.8);
-        }
-
-        .obrand h1 {
-                margin: 0;
-                font-size: 12px;
+                color: #91aaa9;
+                font-size: 9px;
                 font-weight: 700;
-                letter-spacing: 0.16em;
+                letter-spacing: 1.15px;
                 text-transform: uppercase;
-                color: #eef5fb;
+                margin-bottom: 12px;
         }
 
-        .obrand p {
-                margin: 1px 0 0;
-                font-size: 10.5px;
-                color: var(--dim);
-                letter-spacing: 0.02em;
+        .ometa-top span:last-child {
+                display: inline-flex;
+                align-items: center;
+                color: #9cb4b2;
+                font-size: 11px;
+                font-weight: 500;
+                letter-spacing: 0;
+                text-transform: none;
+        }
+
+        .ometa-top span:last-child::before {
+                content: '';
+                display: inline-block;
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: var(--accent);
+                margin-right: 7px;
         }
 
         /* ---------- intro / loading / error ---------- */
         .ointro h2 {
-                margin: 0;
-                font-size: 14px;
-                font-weight: 600;
-                letter-spacing: -0.01em;
+                margin: 0 0 5px;
+                font-size: 19px;
+                font-weight: 700;
+                letter-spacing: -0.45px;
+                line-height: 1.25;
         }
 
         .ointro p {
-                margin: 4px 0 0;
+                margin: 0 0 13px;
                 font-size: 11.5px;
-                line-height: 1.62;
+                line-height: 1.5;
                 color: var(--muted);
                 max-width: 52ch;
+        }
+
+        .ointro--tight h2 {
+                margin-bottom: 0;
         }
 
         .oloading {
@@ -1400,47 +1594,35 @@
         }
 
         .oerror {
-                background: rgba(255, 107, 107, 0.08);
-                border: 1px solid rgba(255, 107, 107, 0.4);
-                color: var(--danger);
-                border-radius: 10px;
-                padding: 8px 12px;
-                font-size: 11.5px;
-                line-height: 1.55;
-                margin-bottom: 12px;
                 display: flex;
-                align-items: baseline;
-                gap: 8px;
                 flex-wrap: wrap;
+                align-items: baseline;
+                gap: 4px 10px;
+                background: rgba(241, 170, 161, 0.08);
+                border: 1px solid rgba(241, 170, 161, 0.4);
+                color: #ffd9d2;
+                padding: 10px 12px;
+                border-radius: 9px;
+                font-size: 11.5px;
+                line-height: 1.5;
+                margin-bottom: 12px;
         }
 
         .oerror a {
-                color: var(--danger);
+                color: var(--accent);
                 font-weight: 600;
         }
 
-        .oerror a:focus-visible {
-                outline: 2px solid rgba(255, 107, 107, 0.6);
-                outline-offset: 2px;
-                border-radius: 4px;
-        }
-
-        /* ---------- form ---------- */
+        /* ---------- fields ---------- */
         .oform {
-                display: flex;
-                flex-direction: column;
+                display: grid;
                 gap: 10px;
-                margin-top: 0;
-        }
-
-        .oform--claim {
-                margin-top: 2px;
         }
 
         .ofield {
-                display: flex;
-                flex-direction: column;
+                display: grid;
                 gap: 5px;
+                margin-top: 2px;
         }
 
         .olabel-row {
@@ -1451,120 +1633,77 @@
         }
 
         .olabel {
-                font-size: 10px;
-                font-weight: 700;
-                letter-spacing: 0.11em;
-                text-transform: uppercase;
-                color: #8494a3;
+                font-size: 11px;
+                font-weight: 600;
+                color: #d1dfda;
         }
 
         .olabel-note {
-                font-family: var(--mono);
-                font-size: 9.5px;
-                letter-spacing: 0.02em;
-                color: var(--accent);
-                opacity: 0.85;
-                padding: 1px 6px;
-                border-radius: 5px;
-                background: rgba(61, 220, 151, 0.1);
-                border: 1px solid rgba(61, 220, 151, 0.22);
-        }
-
-        .olinkbtn {
-                border: 0;
-                background: none;
-                padding: 2px 0;
-                cursor: pointer;
-                font-family: var(--mono);
                 font-size: 10px;
-                letter-spacing: 0.03em;
                 color: var(--dim);
-                transition: color 0.15s;
-        }
-
-        .olinkbtn:hover {
-                color: var(--accent);
-        }
-
-        .olinkbtn:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.6);
-                outline-offset: 3px;
-                border-radius: 4px;
         }
 
         .ocontrol {
                 position: relative;
         }
 
-        .ocontrol > .oinput {
-                padding-right: 38px;
+        .ocontrol .oinput {
+                padding-right: 52px;
         }
 
         .oinput {
                 width: 100%;
-                min-height: 34px;
-                padding: 7px 9px;
-                border-radius: 8px;
-                border: 1px solid var(--line);
-                background: #080c11;
+                min-width: 0;
+                min-height: 38px;
+                padding: 0 12px;
+                background: var(--input);
+                border: 1px solid var(--line-hi);
                 color: var(--text);
-                font: inherit;
-                font-size: 12.5px;
-                line-height: 1.3;
-                transition:
-                        border-color 0.16s ease,
-                        box-shadow 0.16s ease,
-                        background 0.16s ease;
-        }
-
-        .oinput::placeholder {
-                color: #3f4b58;
-        }
-
-        .oinput:hover {
-                border-color: var(--line-hi);
-        }
-
-        .oinput:focus {
+                border-radius: 8px;
                 outline: none;
-                border-color: rgba(61, 220, 151, 0.5);
-                box-shadow: 0 0 0 3px var(--accent-glow);
-                background: #090e13;
+                font-size: 12px;
+                transition: border-color 0.15s, box-shadow 0.15s;
         }
 
         .oinput--mono {
                 font-family: var(--mono);
-                font-size: 11.5px;
                 letter-spacing: 0.02em;
+        }
+
+        .oinput:focus {
+                border-color: var(--accent);
+                box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        .oinput::placeholder {
+                color: #71868a;
+        }
+
+        .ofield.has-error .oinput {
+                border-color: rgba(241, 170, 161, 0.65);
+        }
+
+        .ofield.is-valid .oinput {
+                border-color: #3c6258;
         }
 
         .ocontrol__btn {
                 position: absolute;
-                right: 6px;
+                right: 7px;
                 top: 50%;
                 transform: translateY(-50%);
-                width: 30px;
-                height: 30px;
                 display: grid;
                 place-items: center;
+                width: 28px;
+                height: 28px;
+                background: none;
                 border: 0;
-                border-radius: 7px;
-                background: transparent;
+                border-radius: 6px;
                 color: var(--dim);
-                cursor: pointer;
-                transition:
-                        color 0.15s,
-                        background 0.15s;
         }
 
         .ocontrol__btn:hover {
                 color: var(--text);
-                background: rgba(255, 255, 255, 0.06);
-        }
-
-        .ocontrol__btn:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.6);
-                outline-offset: 1px;
         }
 
         .oeye .icon-hide {
@@ -1579,250 +1718,141 @@
                 display: block;
         }
 
+        .oeye.is-on {
+                color: var(--accent);
+        }
+
         .ostatus {
                 position: absolute;
-                right: 14px;
+                right: 11px;
                 top: 50%;
                 transform: translateY(-50%);
-                color: var(--accent);
-                opacity: 0;
-                pointer-events: none;
-                transition:
-                        opacity 0.2s ease,
-                        transform 0.2s ease;
-        }
-
-        .ostatus svg {
-                display: block;
-        }
-
-        .ofield.is-valid .ostatus {
-                opacity: 1;
-        }
-
-        .ohint {
-                margin: 0;
-                font-size: 10.75px;
-                color: var(--dim);
-                line-height: 1.5;
-        }
-
-        .ohint--warn {
-                color: var(--warn);
-        }
-
-        .oerr {
-                margin: 0;
-                font-size: 10.75px;
-                color: var(--danger);
-                display: flex;
-                align-items: center;
-                gap: 6px;
-        }
-
-        .ofield.has-error .oinput {
-                border-color: rgba(255, 107, 107, 0.55);
-                box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1);
-        }
-
-        /* ---------- compact token row (locked wording) ---------- */
-        .otoken-row {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                flex-wrap: wrap;
-                padding: 7px 10px;
-                border-radius: 10px;
-                border: 1px solid rgba(61, 220, 151, 0.3);
-                background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.035));
-                box-shadow:
-                        0 0 0 1px rgba(0, 0, 0, 0.3) inset,
-                        0 10px 28px -20px rgba(61, 220, 151, 0.95);
-                animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-        }
-
-        .otoken-row__badge {
-                width: 18px;
-                height: 18px;
-                flex: 0 0 auto;
-                border-radius: 50%;
                 display: grid;
                 place-items: center;
                 color: var(--accent);
-                background: rgba(61, 220, 151, 0.16);
-                border: 1px solid rgba(61, 220, 151, 0.42);
-                animation: pop 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.35) both;
+                pointer-events: none;
         }
 
-        @keyframes pop {
-                from {
-                        transform: scale(0.72);
-                        opacity: 0.35;
-                }
-                to {
-                        transform: none;
-                        opacity: 1;
-                }
-        }
-
-        .otoken-row__label {
-                font-size: 11.5px;
-                font-weight: 600;
-                color: #c8f4de;
-                white-space: nowrap;
-        }
-
-        .otoken-row__sep {
-                opacity: 0.4;
+        .ohint {
+                font-size: 11px;
                 color: var(--dim);
+                margin: 1px 0 0;
         }
 
-        .otoken-row__mask {
-                font-family: var(--mono);
-                font-size: 10.5px;
-                color: #8fb3a5;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                min-width: 0;
-                flex: 1 1 auto;
+        .ohint--warn {
+                color: #f1d6aa;
         }
 
-        .otoken-row__action {
+        .oerr {
+                display: flex;
+                gap: 6px;
+                align-items: flex-start;
+                font-size: 11px;
+                color: var(--danger);
+                margin: 1px 0 0;
+        }
+
+        .oerr svg {
                 flex: 0 0 auto;
-                border: 1px solid var(--line);
-                background: rgba(255, 255, 255, 0.03);
-                color: var(--muted);
-                border-radius: 7px;
-                padding: 4px 9px;
-                cursor: pointer;
-                font: inherit;
-                font-family: var(--mono);
-                font-size: 10px;
-                letter-spacing: 0.02em;
-                transition:
-                        color 0.15s,
-                        border-color 0.15s,
-                        background 0.15s;
+                margin-top: 2px;
         }
 
-        .otoken-row__action:hover {
-                color: var(--text);
-                border-color: var(--line-hi);
-                background: rgba(255, 255, 255, 0.06);
+        .oerr--code {
+                color: var(--danger);
         }
 
-        .otoken-row__action:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.6);
-                outline-offset: 2px;
-        }
-
-                /* ---------- password meter ---------- */
+        /* ---------- password strength meter (v6) ---------- */
         .ometer {
                 display: flex;
-                gap: 5px;
-                margin-top: 2px;
+                gap: 4px;
+                margin-top: 3px;
         }
 
         .ometer__bar {
-                flex: 1;
                 height: 3px;
-                border-radius: 2px;
-                background: #18212b;
-                transition: background 0.25s ease;
+                flex: 1;
+                background: #2d3d3f;
+                border-radius: 5px;
+                transition: background 0.2s;
         }
 
-        .ometer-row {
+        .ostrength-row {
                 display: flex;
                 align-items: center;
+                justify-content: space-between;
                 gap: 10px;
-                margin-top: 2px;
+                font-size: 10.5px;
+                color: var(--dim);
         }
 
         .ostrength {
-                font-size: 10px;
-                font-weight: 700;
-                letter-spacing: 0.09em;
-                text-transform: uppercase;
-                white-space: nowrap;
-                color: var(--dim);
-                transition: color 0.2s;
-        }
-
-        /* ---------- button ---------- */
-        .obtn {
-                position: relative;
-                width: 100%;
-                min-height: 38px;
-                margin-top: 2px;
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 10px;
-                padding: 0 15px;
-                border: 1px solid transparent;
-                border-radius: 9px;
-                font: inherit;
-                font-size: 12.75px;
-                font-weight: 700;
-                letter-spacing: 0.01em;
-                color: #04120c;
-                cursor: pointer;
-                background: linear-gradient(180deg, #4ae5a4, #2fc98a);
-                box-shadow:
-                        0 1px 0 rgba(255, 255, 255, 0.35) inset,
-                        0 12px 32px -14px rgba(61, 220, 151, 0.9);
-                transition:
-                        filter 0.16s ease,
-                        transform 0.1s ease,
-                        box-shadow 0.16s ease;
-        }
-
-        .obtn:hover {
-                filter: brightness(1.06);
-        }
-
-        .obtn:active {
-                transform: translateY(1px);
-        }
-
-        .obtn:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.9);
-                outline-offset: 3px;
-        }
-
-        .obtn[disabled] {
-                cursor: progress;
-                filter: saturate(0.75) brightness(0.92);
-        }
-
-        .obtn--secondary {
-                background: rgba(255, 255, 255, 0.03);
-                color: var(--muted);
-                border: 1px solid var(--line);
-                box-shadow: none;
                 font-weight: 600;
         }
 
-        .obtn--secondary:hover {
+        /* ---------- buttons ---------- */
+        .obtn {
+                width: 100%;
+                min-height: 38px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                gap: 8px;
+                padding: 8px 12px;
+                border: 1px solid var(--accent);
+                background: var(--accent);
+                color: #0b2923;
+                font-size: 12px;
+                font-weight: 700;
+                border-radius: 8px;
+                transition: background 0.15s, transform 0.15s, border-color 0.15s;
+        }
+
+        .obtn:hover:not(:disabled) {
+                background: #a4e7d3;
+                transform: translateY(-1px);
+        }
+
+        .obtn:active:not(:disabled) {
+                transform: translateY(0);
+        }
+
+        .obtn:disabled {
                 filter: none;
-                color: var(--text);
-                border-color: var(--line-hi);
-                background: rgba(255, 255, 255, 0.06);
+        }
+
+        .obtn--secondary {
+                background: transparent;
+                border-color: #455c5e;
+                color: #e1ece8;
+        }
+
+        .obtn--secondary:hover:not(:disabled) {
+                background: #26383b;
+        }
+
+        .obtn--danger {
+                background: #49302d;
+                border-color: #99665d;
+                color: #ffddd7;
+        }
+
+        .obtn--danger:hover:not(:disabled) {
+                background: #563832;
         }
 
         .obtn__spinner {
                 display: none;
-                width: 14px;
-                height: 14px;
+                width: 12px;
+                height: 12px;
+                flex: 0 0 auto;
+                border: 2px solid currentColor;
+                border-right-color: transparent;
                 border-radius: 50%;
-                border: 2px solid rgba(4, 18, 12, 0.3);
-                border-top-color: #04120c;
-                animation: spin 0.7s linear infinite;
         }
 
         .obtn.is-loading .obtn__spinner {
-                display: block;
+                display: inline-block;
+                animation: spin 0.7s linear infinite;
         }
 
         @keyframes spin {
@@ -1831,596 +1861,789 @@
                 }
         }
 
-        /* ---------- meta / disclosure ---------- */
-        .ometa {
+        .olinkbtn {
+                background: none;
+                border: 0;
+                padding: 3px 0;
+                color: var(--accent);
+                font-size: 12px;
+                font-weight: 600;
+        }
+
+        .olinkbtn:hover {
+                text-decoration: underline;
+        }
+
+        .oactions {
+                display: grid;
+                gap: 9px;
+                margin-top: 13px;
+        }
+
+        /* ---------- token chip (v6 panel.token) ---------- */
+        .otoken-row {
                 display: flex;
                 align-items: center;
-                justify-content: center;
                 gap: 8px;
-                flex-wrap: wrap;
-                margin-top: 8px;
-                font-family: var(--mono);
-                font-size: 9.5px;
-                letter-spacing: 0.05em;
-                color: #4e5c6a;
-                text-transform: lowercase;
+                padding: 9px 11px;
+                background: #1a302e;
+                border: 1px solid #3c6258;
+                border-radius: 10px;
         }
 
-        .ometa .dot {
-                opacity: 0.45;
+        .otoken-row__badge {
+                display: grid;
+                place-items: center;
+                color: var(--accent);
+                flex: 0 0 auto;
         }
 
-        .odisclosure {
-                margin-top: 12px;
-                padding-top: 10px;
-                border-top: 1px solid var(--line-soft);
-        }
-
-        .odisclosure summary {
-                display: inline-flex;
-                align-items: center;
-                gap: 6px;
-                cursor: pointer;
-                list-style: none;
+        .otoken-row__label {
                 font-size: 11px;
-                color: var(--dim);
-                transition: color 0.15s;
+                font-weight: 600;
+                color: #d8e4df;
+                white-space: nowrap;
         }
 
-        .odisclosure summary::-webkit-details-marker {
-                display: none;
-        }
-
-        .odisclosure summary:hover {
-                color: var(--muted);
-        }
-
-        .odisclosure summary:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.55);
-                outline-offset: 3px;
-                border-radius: 4px;
-        }
-
-        .odisclosure summary .chev {
-                transition: transform 0.2s ease;
-        }
-
-        .odisclosure[open] summary .chev {
-                transform: rotate(180deg);
-        }
-
-        .odisclosure p {
-                margin: 9px 0 0;
-                font-size: 11px;
-                line-height: 1.65;
-                color: var(--dim);
-        }
-
-        .odisclosure code {
+        .otoken-row__mask {
+                flex: 1 1 auto;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
                 font-family: var(--mono);
                 font-size: 10.5px;
-                padding: 1px 5px;
-                border-radius: 4px;
-                background: rgba(255, 255, 255, 0.05);
-                color: #a9b8c6;
+                letter-spacing: 0.04em;
+                color: #9cb4b2;
         }
 
-        /* ---------- wizard steps (same design language) ---------- */
-        .oactions {
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-                margin-top: 14px;
+        .otoken-row__action {
+                margin-left: auto;
+                flex: 0 0 auto;
+                background: none;
+                border: 0;
+                padding: 3px 0;
+                color: var(--accent);
+                font-size: 11px;
+                font-weight: 600;
         }
 
-        .ocheck-row {
-                display: flex;
-                align-items: flex-start;
-                gap: 10px;
-                font-size: 11.5px;
-                color: var(--text);
-                line-height: 1.5;
+        .otoken-row__action:hover {
+                text-decoration: underline;
         }
 
-        .ocheck-row input {
+        /* ---------- panels (v6 .panel) ---------- */
+        .opanel {
+                background: var(--raised);
+                border: 1px solid #315052;
+                border-radius: 10px;
+                padding: 11px;
                 margin-top: 2px;
-                accent-color: var(--accent);
         }
 
-        /* ---------- MFA: QR row + setup key (prototype layout) ---------- */
+        .opanel__head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                margin-bottom: 8px;
+        }
+
+        .opanel__head strong {
+                font-size: 12px;
+                color: #e1ece8;
+        }
+
+        .otag {
+                font-size: 10px;
+                font-weight: 600;
+                color: var(--accent);
+        }
+
+        .otag--dim {
+                color: var(--dim);
+        }
+
+        /* ---------- MFA: QR + manual secret ---------- */
         .oqr-row {
                 display: flex;
-                gap: 16px;
-                align-items: flex-start;
-                padding-bottom: 16px;
-                margin-top: 2px;
-                border-bottom: 1px solid var(--line-soft);
+                align-items: center;
+                gap: 11px;
+                margin-top: 9px;
         }
 
         .oqr {
-                flex: 0 0 auto;
+                width: 112px;
+                height: 112px;
+                flex: 0 0 112px;
                 background: #ffffff;
-                border-radius: 9px;
                 padding: 8px;
-                box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.9);
+                border-radius: 8px;
+                display: grid;
+                place-items: center;
         }
 
-        /* The QR SVG must be sized explicitly: a viewBox-only <svg> has no
-           intrinsic size and collapses to 0x0 inside this box. :global() is
-           required: the <svg> arrives via {@html}. Keep in sync with
-           QR_SIZE in src/lib/qr.js. */
+        /* The QR SVG arrives with explicit dimensions; scale it to the tile
+           (v0.4.4 lesson: a viewBox-only svg collapses to 0x0). */
         .oqr :global(svg) {
+                width: 100%;
+                height: 100%;
                 display: block;
-                width: 120px;
-                height: 120px;
         }
 
         .oqr-copy {
-                flex: 1 1 auto;
                 min-width: 0;
         }
 
+        .oqr-copy strong {
+                display: block;
+                font-size: 12px;
+                color: #e1ece8;
+        }
+
         .oqr-copy > p {
-                margin: 0 0 10px;
+                margin: 5px 0 0;
                 font-size: 11px;
-                line-height: 1.55;
+                line-height: 1.5;
                 color: var(--muted);
+        }
+
+        .omfa-help {
+                font-size: 11px;
+                color: var(--muted);
+                margin: 7px 0 0;
+        }
+
+        .omfa-help summary {
+                color: var(--accent);
+                cursor: pointer;
+                font-weight: 600;
+                font-size: 11px;
+        }
+
+        .omfa-help p {
+                margin: 6px 0 0;
+                line-height: 1.5;
+        }
+
+        .omfa-help a {
+                color: var(--accent);
+                text-underline-offset: 2px;
         }
 
         .okey-field {
                 display: flex;
-                align-items: stretch;
+                align-items: center;
+                gap: 8px;
+                min-height: 38px;
+                padding: 0 6px 0 11px;
+                background: var(--input);
                 border: 1px solid var(--line-hi);
                 border-radius: 8px;
-                background: #080c11;
-                overflow: hidden;
+                margin-top: 5px;
         }
 
         .okey-field code {
                 flex: 1 1 auto;
                 min-width: 0;
-                padding: 8px 9px;
                 font-family: var(--mono);
-                font-size: 10.5px;
-                letter-spacing: 0.09em;
-                color: #cfe0ee;
-                white-space: nowrap;
-                overflow-x: auto;
-                scrollbar-width: none;
-                display: flex;
-                align-items: center;
-        }
-
-        .okey-field code::-webkit-scrollbar {
-                display: none;
+                font-size: 11.5px;
+                letter-spacing: 0.08em;
+                color: #cfe3dd;
+                overflow-wrap: anywhere;
         }
 
         .okey-field__copy {
                 flex: 0 0 auto;
+                background: none;
                 border: 0;
-                border-left: 1px solid var(--line);
-                background: transparent;
-                color: var(--muted);
-                font: inherit;
-                font-size: 10.5px;
-                font-weight: 600;
-                padding: 0 10px;
-                cursor: pointer;
-                transition:
-                        background 0.15s,
-                        color 0.15s;
+                padding: 6px 8px;
+                color: var(--accent);
+                font-size: 11px;
+                font-weight: 700;
+                border-radius: 6px;
         }
 
         .okey-field__copy:hover {
-                background: rgba(255, 255, 255, 0.04);
-                color: var(--text);
+                text-decoration: underline;
         }
 
         .okey-field__copy.done {
                 color: var(--accent);
         }
 
-        .okey-field__copy:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.6);
-                outline-offset: -2px;
-        }
-
-        /* ---------- MFA: six-box code entry (prototype) ---------- */
-        .oform--otp {
-                margin-top: 12px;
-        }
-
+        /* ---------- six-digit OTP boxes (behaviour preserved) ---------- */
         .ootp {
                 display: flex;
-                gap: 7px;
+                gap: 6px;
+                margin-top: 2px;
         }
 
         .ootp input {
                 width: 100%;
                 min-width: 0;
                 height: 40px;
-                padding: 0;
                 text-align: center;
                 font-family: var(--mono);
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 600;
                 color: var(--text);
-                background: #080c11;
+                background: var(--input);
                 border: 1px solid var(--line-hi);
                 border-radius: 8px;
                 outline: none;
-                caret-color: var(--accent);
-                transition:
-                        border-color 0.15s,
-                        box-shadow 0.15s,
-                        background 0.15s;
-        }
-
-        .ootp input:hover {
-                border-color: #3a4a5c;
+                transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
         }
 
         .ootp input:focus {
                 border-color: var(--accent);
-                box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.14);
+                box-shadow: 0 0 0 3px var(--accent-glow);
         }
 
         .ootp.invalid input {
-                border-color: rgba(255, 107, 107, 0.65);
-                background: #150e10;
-        }
-
-        .ootp.invalid input:focus {
-                box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);
+                border-color: #b96a5e;
+                background: #2a1b18;
+                color: #ffddd7;
         }
 
         .ootp.shake {
-                animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+                animation: shake 0.4s ease-in-out;
         }
 
         @keyframes shake {
-                10%,
-                90% {
-                        transform: translateX(-2px);
+                0%, 100% {
+                        transform: translateX(0);
                 }
-                20%,
+                20% {
+                        transform: translateX(-5px);
+                }
+                40% {
+                        transform: translateX(5px);
+                }
+                60% {
+                        transform: translateX(-4px);
+                }
                 80% {
                         transform: translateX(3px);
                 }
-                30%,
-                50%,
-                70% {
-                        transform: translateX(-5px);
-                }
-                40%,
-                60% {
-                        transform: translateX(5px);
-                }
         }
 
-        .oerr--code {
-                margin-top: 7px;
+        /* ---------- skip row + warning ---------- */
+        .oskip-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                margin-top: 12px;
+        }
+
+        .oskip-row__text {
+                font-size: 11px;
+                color: var(--dim);
+        }
+
+        .owarn {
+                border: 1px solid #7b5549;
+                background: #302522;
+                padding: 14px;
+                border-radius: 9px;
+                margin-top: 12px;
+                color: #e5c9bb;
+        }
+
+        .owarn__title {
+                margin: 0;
+                font-size: 12px;
+                font-weight: 700;
+                color: #ffe0ce;
+        }
+
+        .owarn__list {
+                margin: 8px 0;
+                padding-left: 16px;
+                font-size: 11.5px;
+                line-height: 1.55;
+        }
+
+        .owarn__list li {
+                margin: 3px 0;
+        }
+
+        .owarn__note {
+                margin: 0;
+                font-size: 10.5px;
+                line-height: 1.5;
+                color: #c9a98f;
+        }
+
+        .owarn__actions {
+                display: grid;
+                gap: 9px;
+                margin-top: 11px;
+        }
+
+        .ocheck-row {
+                display: flex;
+                gap: 10px;
                 align-items: flex-start;
+                margin-top: 11px;
+                font-size: 12px;
+                line-height: 1.5;
+                color: #d8e4df;
+                cursor: pointer;
+        }
+
+        .ocheck-row input {
+                accent-color: var(--accent);
+                width: 16px;
+                height: 16px;
+                flex-shrink: 0;
+                margin: 2px 0 0;
+        }
+
+        .ocheck-row--tight {
+                margin-top: 8px;
+        }
+
+        /* ---------- recovery codes (v6 grid) ---------- */
+        .ocodegrid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px;
+                margin: 10px 0;
+        }
+
+        .ocode {
+                display: flex;
+                gap: 7px;
+                align-items: center;
+                background: #0c191d;
+                border-radius: 7px;
+                padding: 7px;
+                min-width: 0;
+        }
+
+        .ocode small {
+                color: #779093;
+                font-size: 10px;
+                flex: 0 0 auto;
+        }
+
+        .ocode code {
+                font-family: var(--mono);
+                font-size: 10.5px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                color: #e0eee9;
+        }
+
+        /* ---------- address choices (v6) ---------- */
+        .ochoice {
+                display: grid;
+                gap: 8px;
+                margin: 13px 0;
+        }
+
+        .ochoice__opt {
+                display: flex;
+                align-items: center;
+                gap: 11px;
+                text-align: left;
+                width: 100%;
+                padding: 11px;
+                background: #111e22;
+                border: 1px solid #3b4f52;
+                border-radius: 10px;
+                color: var(--text);
+                transition: border-color 0.15s, background 0.15s;
+        }
+
+        .ochoice__opt:hover {
+                border-color: #4b6365;
+        }
+
+        .ochoice__opt.is-active {
+                border-color: var(--accent);
+                background: #1b3230;
+        }
+
+        .oradio {
+                width: 17px;
+                height: 17px;
+                border-radius: 50%;
+                border: 1.5px solid #839c9c;
+                display: grid;
+                place-items: center;
+                flex-shrink: 0;
+        }
+
+        .ochoice__opt.is-active .oradio {
+                border-color: var(--accent);
+        }
+
+        .ochoice__opt.is-active .oradio::after {
+                content: '';
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: var(--accent);
+        }
+
+        .ochoice__text {
+                min-width: 0;
+        }
+
+        .ochoice__title {
+                display: block;
+                font-size: 12px;
+                font-weight: 700;
+                color: #e1ece8;
+        }
+
+        .ochoice__sub {
+                display: block;
+                color: var(--muted);
+                font-size: 11px;
+                margin-top: 2px;
+        }
+
+        .osubtle-center {
+                text-align: center;
+                color: #789092;
+                font-size: 11px;
+                margin: 14px 0 0;
+        }
+
+        /* ---------- DNS verification (v6 panels) ---------- */
+        .odns-success {
+                display: flex;
+                gap: 9px;
+                align-items: center;
+                background: #19342d;
+                color: #c4e8da;
+                border: 1px solid #397460;
+                border-radius: 9px;
+                padding: 11px;
+                font-size: 12px;
+                line-height: 1.5;
+                margin-top: 12px;
+        }
+
+        .odns-success strong {
+                color: var(--accent);
+        }
+
+        .odns-success__icon {
+                flex: 0 0 19px;
+                width: 19px;
+                height: 19px;
+                display: grid;
+                place-items: center;
+                border: 1.5px solid var(--accent);
+                border-radius: 50%;
+                color: var(--accent);
+        }
+
+        .odns-success + .obtn {
+                margin-top: 9px;
+        }
+
+        .odns-help {
+                background: #29251d;
+                border: 1px solid #665338;
+                border-radius: 9px;
+                padding: 12px;
+                margin-top: 12px;
+                color: #e3d1af;
+                font-size: 12px;
+        }
+
+        .odns-help strong {
+                display: block;
+                font-size: 12px;
+                color: #f0d7a7;
+        }
+
+        .odns-help p {
+                margin: 7px 0;
                 line-height: 1.5;
         }
 
-        .oerr--code svg {
-                flex: 0 0 auto;
-                margin-top: 1px;
+        .odns-record {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: 12px;
+                border-top: 1px solid #594b38;
+                padding: 8px 0;
+                font-size: 11px;
         }
 
-        /* ---------- MFA: success view (prototype) ---------- */
-        .osuccess {
+        .odns-record span {
+                color: #b3a382;
+                flex: 0 0 auto;
+        }
+
+        .odns-record code {
+                font-family: var(--mono);
+                overflow-wrap: anywhere;
+                text-align: right;
+                font-size: 11px;
+                color: #ead9b6;
+        }
+
+        .odns-help .obtn--secondary {
+                margin-top: 4px;
+        }
+
+        .oapplied {
+                background: var(--raised);
+                border: 1px solid #315052;
+                border-radius: 10px;
+                padding: 12px;
+                margin-top: 12px;
+                font-size: 12px;
+                color: #c4e8da;
+        }
+
+        .oapplied__title {
                 display: flex;
-                flex-direction: column;
                 align-items: center;
+                gap: 7px;
+                margin: 0 0 7px;
+                font-weight: 700;
+                font-size: 12px;
+                color: var(--accent);
+        }
+
+        .oapplied p {
+                margin: 0 0 11px;
+                line-height: 1.5;
+        }
+
+        .oapplied strong {
+                color: var(--accent);
+        }
+
+        .odomain-exit {
+                display: grid;
+                gap: 9px;
+                margin-top: 13px;
                 text-align: center;
-                padding: 18px 8px 10px;
-                animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .odomain-exit .olinkbtn {
+                justify-self: center;
+        }
+
+        /* ---------- success / completion (v6) ---------- */
+        .osuccess {
+                text-align: center;
+                margin-top: 6px;
         }
 
         .osuccess__badge {
                 width: 46px;
                 height: 46px;
-                margin: 0 auto 14px;
+                margin: 4px auto 12px;
+                background: #1d3d35;
+                border: 1px solid #4b927c;
                 border-radius: 50%;
                 display: grid;
                 place-items: center;
-                background: rgba(61, 220, 151, 0.1);
-                border: 1px solid rgba(61, 220, 151, 0.35);
                 color: var(--accent);
         }
 
         .osuccess h2 {
-                margin: 0 0 6px;
-                font-size: 16px;
-                font-weight: 650;
-                letter-spacing: -0.01em;
+                margin: 0 0 5px;
+                font-size: 19px;
+                font-weight: 700;
+                letter-spacing: -0.45px;
+                line-height: 1.25;
         }
 
         .osuccess p {
-                margin: 0 auto 18px;
-                max-width: 38ch;
-                color: var(--muted);
+                margin: 0 auto 13px;
+                max-width: 42ch;
                 font-size: 11.5px;
-                line-height: 1.6;
+                line-height: 1.55;
+                color: var(--muted);
         }
 
-        .obtn--slim {
-                max-width: 240px;
-                margin: 0 auto;
-        }
-
-        .ocodes-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
-                gap: 7px;
-                margin-top: 4px;
-        }
-
-        .ocode-chip {
-                font-family: var(--mono);
-                font-size: 13px;
-                background: #080c11;
-                border: 1px solid var(--line);
-                border-radius: 8px;
-                padding: 7px 9px;
-                text-align: center;
-                letter-spacing: 0.08em;
-                color: #cfe0ee;
-        }
-
-        /* ---------- done ---------- */
         .odone {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
                 text-align: center;
-                padding: 14px 0 6px;
-                animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+                margin-top: 6px;
         }
 
         .odone__icon {
-                width: 48px;
-                height: 48px;
-                border-radius: 50%;
-                display: grid;
-                place-items: center;
-                color: var(--accent);
-                background: radial-gradient(circle, rgba(61, 220, 151, 0.22), rgba(61, 220, 151, 0.05));
-                border: 1px solid rgba(61, 220, 151, 0.4);
-                box-shadow: 0 0 44px -8px rgba(61, 220, 151, 0.7);
-                margin-bottom: 14px;
+                margin-top: 18px;
         }
 
         .odone h2 {
-                margin: 0;
-                font-size: 16px;
-                font-weight: 600;
+                margin: 0 0 5px;
+                font-size: 19px;
+                font-weight: 700;
+                letter-spacing: -0.45px;
         }
 
-        .odone p {
-                margin: 8px 0 0;
+        .odone > p {
+                margin: 0 0 6px;
                 font-size: 11.5px;
-                line-height: 1.65;
                 color: var(--muted);
-                max-width: 44ch;
         }
 
-        /* ---------- optional MFA: skip row + warning ---------- */
-        .oskip-row {
+        .odone__panel {
+                margin-top: 14px;
+                text-align: left;
+        }
+
+        .orow {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                font-size: 11.5px;
+        }
+
+        .orow + .orow {
+                margin-top: 10px;
+        }
+
+        .orow__label {
+                color: var(--dim);
+                font-size: 11px;
+        }
+
+        .orow__value {
+                font-family: var(--mono);
+                font-size: 11px;
+                color: #d8e4df;
+                overflow-wrap: anywhere;
+                text-align: right;
+        }
+
+        /* ---------- small print + disclosure ---------- */
+        .odivider {
+                height: 1px;
+                background: var(--line);
+                margin: 12px 0 10px;
+        }
+
+        .ometa {
                 display: flex;
                 align-items: center;
                 justify-content: center;
                 gap: 6px;
-                margin-top: 2px;
+                font-size: 10.5px;
+                color: #789092;
         }
 
-        .oskip-row__text {
-                font-size: 10.75px;
+        .ometa .dot {
                 color: var(--dim);
         }
 
-        .oskip-row__btn {
-                color: var(--warn);
-        }
-
-        .oskip-row__btn:hover {
-                color: var(--warn);
-        }
-
-        .owarn {
-                margin-top: 4px;
-                padding: 10px 12px;
-                border: 1px solid rgba(255, 180, 84, 0.4);
-                background: rgba(255, 180, 84, 0.07);
-                border-radius: 10px;
-                animation: rise 0.3s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-        }
-
-        .owarn__title {
-                margin: 0;
-                font-size: 11.5px;
-                font-weight: 700;
-                color: var(--warn);
-        }
-
-        .owarn__list {
-                margin: 6px 0 0;
-                padding-left: 16px;
-                font-size: 11px;
-                line-height: 1.55;
-                color: var(--muted);
-        }
-
-        .owarn__note {
-                margin: 6px 0 0;
-                font-size: 10.75px;
-                line-height: 1.5;
-                color: var(--dim);
-        }
-
-        .owarn__actions {
-                display: flex;
-                flex-direction: column;
-                gap: 7px;
-                margin-top: 8px;
-        }
-
-        .ocheck-row--tight {
-                margin-top: 8px;
+        .odisclosure {
+                margin-top: 10px;
                 font-size: 11px;
         }
 
-        .obtn--danger {
-                background: linear-gradient(180deg, #ff8585, #e96464);
-                color: #1c0707;
-                box-shadow:
-                        0 1px 0 rgba(255, 255, 255, 0.25) inset,
-                        0 12px 32px -16px rgba(255, 107, 107, 0.8);
-        }
-
-        .obtn--danger .obtn__spinner {
-                border-color: rgba(28, 7, 7, 0.3);
-                border-top-color: #1c0707;
-        }
-
-        /* ---------- access address choice (compact) ---------- */
-        .ochoice {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 8px;
-                margin-top: 2px;
-        }
-
-        .ochoice__opt {
+        .odisclosure summary {
                 display: flex;
-                flex-direction: column;
-                gap: 3px;
-                padding: 9px 10px;
-                border: 1px solid var(--line);
-                border-radius: 10px;
-                background: #080c11;
+                align-items: center;
+                gap: 5px;
+                color: #a6bcbb;
+                font-weight: 500;
                 cursor: pointer;
-                font: inherit;
-                text-align: left;
-                transition:
-                        border-color 0.16s ease,
-                        background 0.16s ease;
+                list-style: none;
         }
 
-        .ochoice__opt:hover {
-                border-color: var(--line-hi);
+        .odisclosure summary::-webkit-details-marker {
+                display: none;
         }
 
-        .ochoice__opt.is-active {
-                border-color: rgba(61, 220, 151, 0.5);
-                background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.03));
-                box-shadow: 0 0 0 3px var(--accent-glow);
+        .odisclosure .chev {
+                transition: transform 0.15s;
         }
 
-        .ochoice__opt:focus-visible {
-                outline: 2px solid rgba(61, 220, 151, 0.6);
-                outline-offset: 2px;
+        .odisclosure[open] .chev {
+                transform: rotate(180deg);
         }
 
-        .ochoice__title {
-                font-size: 11.5px;
-                font-weight: 600;
-                color: var(--text);
-        }
-
-        .ochoice__sub {
-                font-size: 10.25px;
-                line-height: 1.45;
-                color: var(--dim);
-        }
-
-        .oactions--tight {
-                margin-top: 2px;
-                gap: 8px;
-        }
-
-        .oapplied {
-                margin-top: 4px;
-                padding: 9px 11px;
-                border: 1px solid rgba(61, 220, 151, 0.35);
-                background: rgba(61, 220, 151, 0.07);
-                border-radius: 10px;
-                animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-        }
-
-        .oapplied p {
-                margin: 0 0 10px;
-                font-size: 11px;
-                line-height: 1.55;
+        .odisclosure p {
+                margin: 7px 0 0;
                 color: var(--muted);
+                line-height: 1.55;
         }
 
-        .oapplied strong {
+        .odisclosure code {
                 font-family: var(--mono);
-                color: #c8f4de;
-                font-weight: 600;
+                font-size: 10.5px;
+                color: #cfe3dd;
+                background: #0c191d;
+                border-radius: 5px;
+                padding: 1px 5px;
         }
 
-        /* ---------- responsive ---------- */
-        @media (max-width: 520px) {
+        /* ---------- responsive (v4/v6 compact refinements) ---------- */
+        @media (max-width: 490px) {
                 .ob {
-                        padding: 12px 10px;
-                }
-
-                .obshell {
-                        zoom: 1;
+                        padding: 15px 12px 14px;
                 }
 
                 .obcard {
-                        padding: 13px 12px 12px;
-                        border-radius: 11px;
+                        padding: 18px;
                 }
 
-                .otopbar {
-                        gap: 8px;
-                }
-
-                .oqr-row {
-                        flex-direction: column;
+                .ointro h2 {
+                        font-size: 18px;
                 }
 
                 .oqr {
-                        align-self: center;
+                        width: 105px;
+                        height: 105px;
+                        flex-basis: 105px;
                 }
 
-                .ootp {
+                .ocode {
+                        padding: 6px 5px;
                         gap: 5px;
                 }
 
-                .ootp input {
-                        height: 36px;
-                        font-size: 14px;
+                .ocode code {
+                        font-size: 9.5px;
+                }
+        }
+
+        @media (max-height: 760px) and (min-width: 491px) {
+                .ob {
+                        padding-top: 12px;
                 }
 
-                .ometer-row {
-                        flex-wrap: wrap;
+                .otopbar {
+                        margin-bottom: 10px;
                 }
 
-                .ostrength {
-                        margin-left: auto;
+                .obcard {
+                        padding: 18px 22px;
+                }
+
+                .ofield {
+                        margin-top: 1px;
+                }
+
+                .ointro p {
+                        margin-bottom: 10px;
                 }
         }
 
         @media (prefers-reduced-motion: reduce) {
-                .ob,
-                .ob::before,
-                .ob::after,
-                .obcard,
-                .obcard::before,
-                .otoken-row,
-                .otoken-row__badge,
-                .ootp.shake,
-                .odone,
-                .odone__icon {
-                        animation-duration: 0.001ms !important;
+                .ob *,
+                .ob *::before,
+                .ob *::after {
                         transition-duration: 0.001ms !important;
+                        animation-duration: 0.001ms !important;
+                        animation-iteration-count: 1 !important;
                 }
         }
 </style>
