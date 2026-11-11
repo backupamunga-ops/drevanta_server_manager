@@ -7,7 +7,7 @@
 import QRCode from 'qrcode';
 
 /** Pixel size (width and height) of the rendered QR code. */
-export const QR_SIZE = 184;
+export const QR_SIZE = 120;
 
 /**
  * Render an otpauth:// URI as an inline SVG string with explicit
@@ -18,10 +18,10 @@ export const QR_SIZE = 184;
  * @returns {Promise<string>} SVG markup with explicit width/height
  */
 export async function qrSvg(uri, size = QR_SIZE) {
-	return QRCode.toString(uri, {
-		type: 'svg',
-		width: size,
-		margin: 1,
-		color: { dark: '#0b1220', light: '#ffffff' }
-	});
+        return QRCode.toString(uri, {
+                type: 'svg',
+                width: size,
+                margin: 1,
+                color: { dark: '#0b1220', light: '#ffffff' }
+        });
 }

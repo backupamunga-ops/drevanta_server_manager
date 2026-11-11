@@ -612,20 +612,26 @@ EOF
 # This screen is reached only after the certificate was issued and the
 # proxy reported phase=active (attempt_https_provisioning gates it).
 print_https_success_screen() {
-	local token="$1" target_file="$2"
-	local ttl_disp="$CLAIM_TTL"
-	[[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
+        local token="$1" target_file="$2"
+        local ttl_disp="$CLAIM_TTL"
+        [[ "$CLAIM_TTL" == "30m" ]] && ttl_disp="30 minutes"
 
-	cat <<EOF
+        cat <<EOF
 
 ✓ DREVANTA INSTALLED SUCCESSFULLY
 
   Your private server console is ready, secured with a publicly
   trusted certificate.
 
+
+  ────────────────────────────────────────────────────────────
+
   OPEN DREVANTA IN YOUR BROWSER
 
   https://${HTTPS_HOST}/onboarding#token=${token}
+
+  ────────────────────────────────────────────────────────────
+
 
   Your setup link expires in ${ttl_disp}
   and can be used only once.
@@ -634,10 +640,10 @@ print_https_success_screen() {
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
-	if [[ -n "$target_file" ]]; then
-		info "a copy of the token is also saved root-only: $target_file - delete it after onboarding"
-	fi
-	info "manage access any time: sudo drevanta access status"
+        if [[ -n "$target_file" ]]; then
+                info "a copy of the token is also saved root-only: $target_file - delete it after onboarding"
+        fi
+        info "manage access any time: sudo drevanta access status"
 }
 
 # attempt_https_provisioning runs the root-only access CLI once and
@@ -766,10 +772,10 @@ summary() {
         info "service:    systemctl status $SERVICE_NAME"
         info "release:    $OPT_DIR/releases/$version"
         if [[ -n "${HTTPS_HOST:-}" ]]; then
-		info "access:     https://${HTTPS_HOST}  (public HTTPS, certificate verified)"
-	else
-		info "endpoint:   http://${BIND_ADDR}:${PORT}  (loopback only - SSH tunnel access)"
-	fi
+                info "access:     https://${HTTPS_HOST}  (public HTTPS, certificate verified)"
+        else
+                info "endpoint:   http://${BIND_ADDR}:${PORT}  (loopback only - SSH tunnel access)"
+        fi
 }
 
 # ---------------------------------------------------------------------------

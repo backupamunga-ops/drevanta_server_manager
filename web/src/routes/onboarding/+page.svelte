@@ -6,6 +6,7 @@
                 ApiError,
                 applyDomain,
                 checkDomain,
+                fetchAccessStatus,
                 fetchOnboardingStatus,
                 postJSON,
                 skipMfa,
@@ -13,7 +14,7 @@
                 type MfaSetup,
                 type MfaVerified
         } from '$lib/api';
-        import { domainHint } from '$lib/access.js';
+        import { accessLabel, accessLabelTitle, domainHint } from '$lib/access.js';
         import {
                 hashFromUrl,
                 isValidTokenShape,
@@ -72,9 +73,20 @@
         let capsOn = $state(false);
 
         // --- MFA enrolment ---------------------------------------------------
+        // Six single-digit boxes exactly as in the approved MFA prototype;
+        // the joined digits go to the same verify endpoint. Invalid codes
+        // get the prototype's red state, shake animation and inline error row.
+        const OTP_LEN = 6;
         let totpSecret = $state('');
         let qrSvg = $state('');
-        let totpCode = $state('');
+        let otpDigits = $state<string[]>(['', '', '', '', '', '']);
+        let otpInvalid = $state(false);
+        let otpShake = $state(false);
+        let otpEls = $state<(HTMLInputElement | null)[]>([]);
+        let mfaDone = $state(false);
+        let copyDone = $state(false);
+        let copyTimer: ReturnType<typeof setTimeout> | undefined;
+        let continueEl = $state<HTMLButtonElement | null>(null);
 
         // --- recovery codes --------------------------------------------------
         let recoveryCodes = $state<string[]>([]);
@@ -113,11 +125,28 @@
         const pwLevel = $derived(scorePassword(password));
         const strengthLabel = $derived(STRENGTH_LABELS[pwLevel]);
         const strengthColor = $derived(LEVEL_COLORS[pwLevel]);
+        const otpCode = $derived(otpDigits.join(''));
+        // Grouped 4-4-4 display of the base32 secret; the copy button copies
+        // the ungrouped value the authenticator expects.
+        const secretDisplay = $derived(totpSecret.replace(/(.{4})/g, '$1 ').trim());
+
+        // --- trusted access pill (topbar, all steps) ---------------------------
+        // Same source of truth as the dashboard and the sign-in page: the
+        // secret-free /api/v1/access/status. Nothing is guessed from the URL.
+        let access = $state<{ mode: 'https' | 'private' } | null>(null);
+        const accessPill = $derived(access ? accessLabel(access) : 'checking access…');
+        const accessTitle = $derived(accessLabelTitle(access));
 
         $effect(() => {
                 if (statusChecked) return;
                 statusChecked = true;
                 void route();
+        });
+
+        $effect(() => {
+                fetchAccessStatus()
+                        .then((a) => (access = { mode: a.mode }))
+                        .catch(() => (access = null));
         });
 
         function announce(msg: string) {
@@ -344,7 +373,8 @@
                         // a viewBox-only <svg> collapses to 0x0 inside .oqr
                         // (production bug: blank white pill instead of a QR code).
                         qrSvg = await renderQrCode(res.otpauth_uri);
-                        totpCode = '';
+                        resetOtp();
+                        mfaDone = false;
                         step = 'mfa-setup';
                 } catch (err) {
                         stepError = err instanceof ApiError ? err.message : String(err);
@@ -357,17 +387,119 @@
                 }
         }
 
+        function resetOtp() {
+                otpDigits = ['', '', '', '', '', ''];
+                otpInvalid = false;
+                otpShake = false;
+        }
+
+        function clearOtpDom() {
+                for (let k = 0; k < OTP_LEN; k++) {
+                        otpDigits[k] = '';
+                        const el = otpEls[k];
+                        if (el) el.value = '';
+                }
+        }
+
+        function onOtpInput(e: Event, i: number) {
+                const el = e.currentTarget as HTMLInputElement;
+                const digits = el.value.replace(/\D/g, '');
+                el.value = digits.slice(-1);
+                otpDigits[i] = el.value;
+                otpInvalid = false;
+                if (el.value && i < OTP_LEN - 1) otpEls[i + 1]?.focus();
+        }
+
+        function onOtpKey(e: KeyboardEvent, i: number) {
+                const el = e.currentTarget as HTMLInputElement;
+                if (e.key === 'Backspace') {
+                        if (!el.value && i > 0) {
+                                const prev = otpEls[i - 1];
+                                if (prev) prev.value = '';
+                                otpDigits[i - 1] = '';
+                                prev?.focus();
+                                otpInvalid = false;
+                                e.preventDefault();
+                        } else {
+                                otpInvalid = false;
+                        }
+                        return;
+                }
+                if (e.key === 'ArrowLeft' && i > 0) {
+                        otpEls[i - 1]?.focus();
+                        e.preventDefault();
+                } else if (e.key === 'ArrowRight' && i < OTP_LEN - 1) {
+                        otpEls[i + 1]?.focus();
+                        e.preventDefault();
+                } else if (e.key === 'Delete') {
+                        el.value = '';
+                        otpDigits[i] = '';
+                        otpInvalid = false;
+                        e.preventDefault();
+                }
+        }
+
+        function onOtpPaste(e: ClipboardEvent) {
+                e.preventDefault();
+                const digits = (e.clipboardData?.getData('text') ?? '')
+                        .replace(/\D/g, '')
+                        .slice(0, OTP_LEN)
+                        .split('');
+                if (!digits.length) return;
+                otpInvalid = false;
+                for (let k = 0; k < OTP_LEN; k++) {
+                        const d = k < digits.length ? digits[k] : '';
+                        otpDigits[k] = d;
+                        const el = otpEls[k];
+                        if (el) el.value = d;
+                }
+                otpEls[Math.min(digits.length, OTP_LEN - 1)]?.focus();
+        }
+
+        async function copySecret() {
+                try {
+                        await navigator.clipboard.writeText(totpSecret);
+                } catch {
+                        // Clipboard API can be unavailable; fall back to a temporary
+                        // textarea like the approved prototype does.
+                        const ta = document.createElement('textarea');
+                        ta.value = totpSecret;
+                        ta.style.position = 'fixed';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        ta.remove();
+                }
+                copyDone = true;
+                clearTimeout(copyTimer);
+                copyTimer = setTimeout(() => (copyDone = false), 1800);
+        }
+
         async function submitTotp(e: SubmitEvent) {
                 e.preventDefault();
+                const code = otpDigits.join('');
+                if (code.length !== OTP_LEN) return;
                 stepError = '';
                 busy = true;
                 try {
-                        const res = await postJSON<MfaVerified>('/api/v1/onboarding/mfa/verify', { code: totpCode.trim() });
+                        const res = await postJSON<MfaVerified>('/api/v1/onboarding/mfa/verify', { code });
                         recoveryCodes = res.recovery_codes;
-                        step = 'recovery';
+                        mfaDone = true;
+                        announce('Multi-factor authentication is enabled. Save your recovery codes next.');
+                        void tick().then(() => continueEl?.focus({ preventScroll: true }));
                 } catch (err) {
                         if (err instanceof ApiError && err.code === 'totp_invalid') {
-                                stepError = 'That code did not match. Check the clock on this device and try the current code.';
+                                // Inline error state from the prototype: red boxes, shake,
+                                // friendly message — no top-of-card banner for this case.
+                                otpInvalid = true;
+                                clearOtpDom();
+                                otpShake = false;
+                                await tick();
+                                requestAnimationFrame(() => {
+                                        requestAnimationFrame(() => (otpShake = true));
+                                });
+                                otpEls[0]?.focus();
                         } else {
                                 stepError = err instanceof ApiError ? err.message : String(err);
                         }
@@ -500,13 +632,13 @@
 <div class="ob">
         <p class="sr-only" role="status" aria-live="polite">{liveMsg}</p>
 
-        <main class="obcard">
-                <header class="ohead">
+        <div class="obshell">
+                <header class="otopbar">
                         <div class="obrand">
                                 <span class="obrand__mark" aria-hidden="true">
                                         <svg
-                                                width="19"
-                                                height="19"
+                                                width="15"
+                                                height="15"
                                                 viewBox="0 0 24 24"
                                                 fill="none"
                                                 stroke="currentColor"
@@ -523,10 +655,18 @@
                                         <p>Private server console</p>
                                 </div>
                         </div>
-
+                        <span
+                                class="opill"
+                                class:is-https={access?.mode === 'https'}
+                                class:is-private={access?.mode === 'private'}
+                                title={accessTitle}
+                        >
+                                <span class="opill__dot" aria-hidden="true"></span>
+                                {accessPill}
+                        </span>
                 </header>
 
-                <div class="odivider"></div>
+                <main class="obcard">
 
                 {#if stepError}
                         <div class="oerror" role="alert">
@@ -787,44 +927,80 @@
                                 </p>
                         </details>
                 {:else if step === 'mfa-setup'}
-                        {#if totpSecret}
-                        <section class="ointro">
-                                <h2>Scan and confirm</h2>
-                                <p>
-                                        Add the entry to your authenticator app by scanning the QR code, or enter the secret
-                                        manually. Then type the current 6-digit code.
-                                </p>
-                        </section>
-                        <div class="oqr">{@html qrSvg}</div>
-                        <div class="ofield">
-                                <label class="olabel" for="secret">Secret (manual entry)</label>
-                                <input
-                                        class="oinput oinput--mono"
-                                        id="secret"
-                                        readonly
-                                        value={totpSecret}
-                                        spellcheck="false"
-                                        onclick={(e) => (e.currentTarget as HTMLInputElement).select()}
-                                />
-                        </div>
-                        <form class="oform" novalidate onsubmit={submitTotp}>
-                                <div class="ofield">
-                                        <label class="olabel" for="totp-code">6-digit code</label>
-                                        <input
-                                                class="oinput oinput--mono"
-                                                id="totp-code"
-                                                inputmode="numeric"
-                                                maxlength={6}
-                                                placeholder="123456"
-                                                autocomplete="one-time-code"
-                                                bind:value={totpCode}
-                                        />
+                        {#if mfaDone}
+                                <section class="osuccess" role="status">
+                                        <div class="osuccess__badge" aria-hidden="true">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                                                        <path d="M4.5 12.5l4.6 4.6L19.5 6.8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                                                </svg>
+                                        </div>
+                                        <h2>MFA enabled</h2>
+                                        <p>
+                                                You'll need your authenticator app the next time you sign in to the Drevanta
+                                                console. Next: save your recovery codes.
+                                        </p>
+                                        <button class="obtn obtn--slim" type="button" bind:this={continueEl} onclick={() => (step = 'recovery')}>
+                                                Continue
+                                        </button>
+                                </section>
+                        {:else if totpSecret}
+                                <section class="ointro">
+                                        <h2>Set up two-factor authentication</h2>
+                                        <p>Add Drevanta to your authenticator app, then enter the 6-digit code to confirm.</p>
+                                </section>
+
+                                <div class="oqr-row">
+                                        <div class="oqr" aria-hidden="true">{@html qrSvg}</div>
+                                        <div class="oqr-copy">
+                                                <p>Scan the QR code with your authenticator app. If you can't scan it, enter the setup key manually.</p>
+                                                <label class="olabel" for="setup-key">Setup key (manual entry)</label>
+                                                <div class="okey-field">
+                                                        <code id="setup-key">{secretDisplay}</code>
+                                                        <button type="button" class="okey-field__copy" class:done={copyDone} onclick={copySecret} aria-label="Copy setup key">
+                                                                {copyDone ? 'Copied' : 'Copy'}
+                                                        </button>
+                                                </div>
+                                        </div>
                                 </div>
-                                        <button class="obtn" type="submit" disabled={busy || totpCode.trim().length !== 6} class:is-loading={busy} aria-busy={busy}>
+
+                                <form class="oform oform--otp" novalidate onsubmit={submitTotp}>
+                                        <div class="ofield">
+                                                <label class="olabel" for="otp0">6-digit code</label>
+                                                <div class="ootp" class:invalid={otpInvalid} class:shake={otpShake}>
+                                                        {#each otpDigits as _, i (i)}
+                                                                <input
+                                                                        id="otp{i}"
+                                                                        type="text"
+                                                                        inputmode="numeric"
+                                                                        autocomplete={i === 0 ? 'one-time-code' : 'off'}
+                                                                        maxlength="1"
+                                                                        aria-label="Digit {i + 1} of 6"
+                                                                        aria-invalid={otpInvalid}
+                                                                        bind:value={otpDigits[i]}
+                                                                        bind:this={otpEls[i]}
+                                                                        oninput={(e) => onOtpInput(e, i)}
+                                                                        onkeydown={(e) => onOtpKey(e, i)}
+                                                                        onpaste={onOtpPaste}
+                                                                        onfocus={(e) => (e.currentTarget as HTMLInputElement).select()}
+                                                                />
+                                                        {/each}
+                                                </div>
+                                                <p class="ohint">Enter the current code shown in your authenticator app.</p>
+                                                <p class="oerr oerr--code" role="alert" hidden={!otpInvalid}>
+                                                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                                                <circle cx="8" cy="8" r="6.4" stroke="currentColor" stroke-width="1.4" />
+                                                                <path d="M8 4.9v3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                                                                <circle cx="8" cy="11.1" r=".85" fill="currentColor" />
+                                                        </svg>
+                                                        <span>That code didn't work. Enter the newest 6-digit code from your authenticator app and try again.</span>
+                                                </p>
+                                        </div>
+                                        <button class="obtn" type="submit" disabled={busy || otpCode.length !== OTP_LEN} class:is-loading={busy} aria-busy={busy}>
                                                 <span class="obtn__spinner" aria-hidden="true"></span>
                                                 <span>{busy ? 'Verifying…' : 'Verify and enable MFA'}</span>
                                         </button>
                                 </form>
+
                                 {#if !skipShown}
                                         <div class="oskip-row">
                                                 <span class="oskip-row__text">Recommended, not required.</span>
@@ -998,7 +1174,8 @@
                                 <p>Onboarding is complete. Opening the dashboard…</p>
                         </section>
                 {/if}
-        </main>
+                </main>
+        </div>
 </div>
 
 <style>
@@ -1020,10 +1197,10 @@
                 min-height: 100vh;
                 display: grid;
                 place-items: center;
-                padding: 22px 16px;
+                padding: 18px 14px;
                 background: #06080b;
                 color: var(--text);
-                font-size: 15px;
+                font-size: 12.5px;
                 line-height: 1.5;
         }
 
@@ -1075,9 +1252,9 @@
         .obcard {
                 position: relative;
                 width: 100%;
-                max-width: 520px;
-                padding: 20px 22px 18px;
-                border-radius: 16px;
+                max-width: 432px;
+                padding: 16px 18px 15px;
+                border-radius: 14px;
                 border: 1px solid var(--line);
                 background:
                         radial-gradient(120% 100% at 50% 0%, rgba(61, 220, 151, 0.055), transparent 56%),
@@ -1110,27 +1287,65 @@
                 }
         }
 
-        /* ---------- header ---------- */
-        .ohead {
+        /* ---------- topbar (outside the card, every step) ---------- */
+        .obshell {
+                width: 100%;
+                max-width: 432px;
+        }
+
+        .otopbar {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                gap: 14px;
-                flex-wrap: wrap;
+                gap: 10px;
+                margin-bottom: 12px;
+        }
+
+        .opill {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                flex: 0 0 auto;
+                font-family: var(--mono);
+                font-size: 10px;
+                letter-spacing: 0.02em;
+                color: var(--muted);
+                border: 1px solid var(--line);
+                background: #0a0e13;
+                border-radius: 999px;
+                padding: 3px 9px;
+                white-space: nowrap;
+        }
+
+        .opill__dot {
+                width: 5px;
+                height: 5px;
+                border-radius: 50%;
+                background: var(--dim);
+        }
+
+        .opill.is-https .opill__dot {
+                background: var(--accent);
+                box-shadow: 0 0 0 2.5px var(--accent-glow);
+        }
+
+        .opill.is-private .opill__dot {
+                background: var(--warn);
+                box-shadow: 0 0 0 2.5px rgba(255, 180, 84, 0.16);
         }
 
         .obrand {
                 display: flex;
                 align-items: center;
-                gap: 12px;
+                gap: 10px;
                 min-width: 0;
         }
 
         .obrand__mark {
-                width: 38px;
-                height: 38px;
+                width: 31px;
+                height: 31px;
                 flex: 0 0 auto;
-                border-radius: 11px;
+                border-radius: 9px;
                 display: grid;
                 place-items: center;
                 color: var(--accent);
@@ -1141,7 +1356,7 @@
 
         .obrand h1 {
                 margin: 0;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 700;
                 letter-spacing: 0.16em;
                 text-transform: uppercase;
@@ -1150,28 +1365,22 @@
 
         .obrand p {
                 margin: 1px 0 0;
-                font-size: 12px;
+                font-size: 10.5px;
                 color: var(--dim);
                 letter-spacing: 0.02em;
-        }
-
-        .odivider {
-                height: 1px;
-                margin: 12px 0 12px;
-                background: linear-gradient(90deg, transparent, var(--line) 10%, var(--line) 90%, transparent);
         }
 
         /* ---------- intro / loading / error ---------- */
         .ointro h2 {
                 margin: 0;
-                font-size: 17px;
+                font-size: 14px;
                 font-weight: 600;
                 letter-spacing: -0.01em;
         }
 
         .ointro p {
-                margin: 5px 0 0;
-                font-size: 13.5px;
+                margin: 4px 0 0;
+                font-size: 11.5px;
                 line-height: 1.62;
                 color: var(--muted);
                 max-width: 52ch;
@@ -1179,7 +1388,7 @@
 
         .oloading {
                 color: var(--dim);
-                padding: 40px 0;
+                padding: 32px 0;
                 text-align: center;
                 margin: 0;
         }
@@ -1189,10 +1398,10 @@
                 border: 1px solid rgba(255, 107, 107, 0.4);
                 color: var(--danger);
                 border-radius: 10px;
-                padding: 10px 14px;
-                font-size: 13px;
+                padding: 8px 12px;
+                font-size: 11.5px;
                 line-height: 1.55;
-                margin-bottom: 16px;
+                margin-bottom: 12px;
                 display: flex;
                 align-items: baseline;
                 gap: 8px;
@@ -1214,7 +1423,7 @@
         .oform {
                 display: flex;
                 flex-direction: column;
-                gap: 12px;
+                gap: 10px;
                 margin-top: 0;
         }
 
@@ -1225,7 +1434,7 @@
         .ofield {
                 display: flex;
                 flex-direction: column;
-                gap: 6px;
+                gap: 5px;
         }
 
         .olabel-row {
@@ -1236,7 +1445,7 @@
         }
 
         .olabel {
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 700;
                 letter-spacing: 0.11em;
                 text-transform: uppercase;
@@ -1245,11 +1454,11 @@
 
         .olabel-note {
                 font-family: var(--mono);
-                font-size: 10.5px;
+                font-size: 9.5px;
                 letter-spacing: 0.02em;
                 color: var(--accent);
                 opacity: 0.85;
-                padding: 2px 7px;
+                padding: 1px 6px;
                 border-radius: 5px;
                 background: rgba(61, 220, 151, 0.1);
                 border: 1px solid rgba(61, 220, 151, 0.22);
@@ -1261,7 +1470,7 @@
                 padding: 2px 0;
                 cursor: pointer;
                 font-family: var(--mono);
-                font-size: 11px;
+                font-size: 10px;
                 letter-spacing: 0.03em;
                 color: var(--dim);
                 transition: color 0.15s;
@@ -1282,19 +1491,19 @@
         }
 
         .ocontrol > .oinput {
-                padding-right: 42px;
+                padding-right: 38px;
         }
 
         .oinput {
                 width: 100%;
-                min-height: 40px;
-                padding: 9px 11px;
-                border-radius: 9px;
+                min-height: 34px;
+                padding: 7px 9px;
+                border-radius: 8px;
                 border: 1px solid var(--line);
                 background: #080c11;
                 color: var(--text);
                 font: inherit;
-                font-size: 14.5px;
+                font-size: 12.5px;
                 line-height: 1.3;
                 transition:
                         border-color 0.16s ease,
@@ -1319,7 +1528,7 @@
 
         .oinput--mono {
                 font-family: var(--mono);
-                font-size: 13px;
+                font-size: 11.5px;
                 letter-spacing: 0.02em;
         }
 
@@ -1328,12 +1537,12 @@
                 right: 6px;
                 top: 50%;
                 transform: translateY(-50%);
-                width: 34px;
-                height: 34px;
+                width: 30px;
+                height: 30px;
                 display: grid;
                 place-items: center;
                 border: 0;
-                border-radius: 8px;
+                border-radius: 7px;
                 background: transparent;
                 color: var(--dim);
                 cursor: pointer;
@@ -1387,7 +1596,7 @@
 
         .ohint {
                 margin: 0;
-                font-size: 12.25px;
+                font-size: 10.75px;
                 color: var(--dim);
                 line-height: 1.5;
         }
@@ -1398,7 +1607,7 @@
 
         .oerr {
                 margin: 0;
-                font-size: 12.25px;
+                font-size: 10.75px;
                 color: var(--danger);
                 display: flex;
                 align-items: center;
@@ -1416,7 +1625,7 @@
                 align-items: center;
                 gap: 8px;
                 flex-wrap: wrap;
-                padding: 8px 11px;
+                padding: 7px 10px;
                 border-radius: 10px;
                 border: 1px solid rgba(61, 220, 151, 0.3);
                 background: linear-gradient(180deg, rgba(61, 220, 151, 0.1), rgba(61, 220, 151, 0.035));
@@ -1451,7 +1660,7 @@
         }
 
         .otoken-row__label {
-                font-size: 12.5px;
+                font-size: 11.5px;
                 font-weight: 600;
                 color: #c8f4de;
                 white-space: nowrap;
@@ -1464,7 +1673,7 @@
 
         .otoken-row__mask {
                 font-family: var(--mono);
-                font-size: 11.5px;
+                font-size: 10.5px;
                 color: #8fb3a5;
                 white-space: nowrap;
                 overflow: hidden;
@@ -1479,11 +1688,11 @@
                 background: rgba(255, 255, 255, 0.03);
                 color: var(--muted);
                 border-radius: 7px;
-                padding: 5px 10px;
+                padding: 4px 9px;
                 cursor: pointer;
                 font: inherit;
                 font-family: var(--mono);
-                font-size: 11px;
+                font-size: 10px;
                 letter-spacing: 0.02em;
                 transition:
                         color 0.15s,
@@ -1525,7 +1734,7 @@
         }
 
         .ostrength {
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 700;
                 letter-spacing: 0.09em;
                 text-transform: uppercase;
@@ -1538,17 +1747,17 @@
         .obtn {
                 position: relative;
                 width: 100%;
-                min-height: 42px;
+                min-height: 38px;
                 margin-top: 2px;
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
                 gap: 10px;
-                padding: 0 18px;
+                padding: 0 15px;
                 border: 1px solid transparent;
-                border-radius: 11px;
+                border-radius: 9px;
                 font: inherit;
-                font-size: 14.5px;
+                font-size: 12.75px;
                 font-weight: 700;
                 letter-spacing: 0.01em;
                 color: #04120c;
@@ -1598,8 +1807,8 @@
 
         .obtn__spinner {
                 display: none;
-                width: 16px;
-                height: 16px;
+                width: 14px;
+                height: 14px;
                 border-radius: 50%;
                 border: 2px solid rgba(4, 18, 12, 0.3);
                 border-top-color: #04120c;
@@ -1623,9 +1832,9 @@
                 justify-content: center;
                 gap: 8px;
                 flex-wrap: wrap;
-                margin-top: 10px;
+                margin-top: 8px;
                 font-family: var(--mono);
-                font-size: 10.5px;
+                font-size: 9.5px;
                 letter-spacing: 0.05em;
                 color: #4e5c6a;
                 text-transform: lowercase;
@@ -1647,7 +1856,7 @@
                 gap: 6px;
                 cursor: pointer;
                 list-style: none;
-                font-size: 12.5px;
+                font-size: 11px;
                 color: var(--dim);
                 transition: color 0.15s;
         }
@@ -1676,14 +1885,14 @@
 
         .odisclosure p {
                 margin: 9px 0 0;
-                font-size: 12.5px;
+                font-size: 11px;
                 line-height: 1.65;
                 color: var(--dim);
         }
 
         .odisclosure code {
                 font-family: var(--mono);
-                font-size: 11.5px;
+                font-size: 10.5px;
                 padding: 1px 5px;
                 border-radius: 4px;
                 background: rgba(255, 255, 255, 0.05);
@@ -1702,7 +1911,7 @@
                 display: flex;
                 align-items: flex-start;
                 gap: 10px;
-                font-size: 13px;
+                font-size: 11.5px;
                 color: var(--text);
                 line-height: 1.5;
         }
@@ -1712,39 +1921,244 @@
                 accent-color: var(--accent);
         }
 
+        /* ---------- MFA: QR row + setup key (prototype layout) ---------- */
+        .oqr-row {
+                display: flex;
+                gap: 16px;
+                align-items: flex-start;
+                padding-bottom: 16px;
+                margin-top: 2px;
+                border-bottom: 1px solid var(--line-soft);
+        }
+
         .oqr {
+                flex: 0 0 auto;
                 background: #ffffff;
-                border-radius: 10px;
-                padding: 10px;
-                width: fit-content;
-                align-self: center;
-                margin: 2px 0 0;
+                border-radius: 9px;
+                padding: 8px;
+                box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.9);
         }
 
         /* The QR SVG must be sized explicitly: a viewBox-only <svg> has no
-           intrinsic size and collapses to 0x0 inside this fit-content box.
-           :global() is required: the <svg> arrives via {@html}. Keep in
-           sync with QR_SIZE in src/lib/qr.js. */
+           intrinsic size and collapses to 0x0 inside this box. :global() is
+           required: the <svg> arrives via {@html}. Keep in sync with
+           QR_SIZE in src/lib/qr.js. */
         .oqr :global(svg) {
                 display: block;
-                width: 184px;
-                height: 184px;
+                width: 120px;
+                height: 120px;
+        }
+
+        .oqr-copy {
+                flex: 1 1 auto;
+                min-width: 0;
+        }
+
+        .oqr-copy > p {
+                margin: 0 0 10px;
+                font-size: 11px;
+                line-height: 1.55;
+                color: var(--muted);
+        }
+
+        .okey-field {
+                display: flex;
+                align-items: stretch;
+                border: 1px solid var(--line-hi);
+                border-radius: 8px;
+                background: #080c11;
+                overflow: hidden;
+        }
+
+        .okey-field code {
+                flex: 1 1 auto;
+                min-width: 0;
+                padding: 8px 9px;
+                font-family: var(--mono);
+                font-size: 10.5px;
+                letter-spacing: 0.09em;
+                color: #cfe0ee;
+                white-space: nowrap;
+                overflow-x: auto;
+                scrollbar-width: none;
+                display: flex;
+                align-items: center;
+        }
+
+        .okey-field code::-webkit-scrollbar {
+                display: none;
+        }
+
+        .okey-field__copy {
+                flex: 0 0 auto;
+                border: 0;
+                border-left: 1px solid var(--line);
+                background: transparent;
+                color: var(--muted);
+                font: inherit;
+                font-size: 10.5px;
+                font-weight: 600;
+                padding: 0 10px;
+                cursor: pointer;
+                transition:
+                        background 0.15s,
+                        color 0.15s;
+        }
+
+        .okey-field__copy:hover {
+                background: rgba(255, 255, 255, 0.04);
+                color: var(--text);
+        }
+
+        .okey-field__copy.done {
+                color: var(--accent);
+        }
+
+        .okey-field__copy:focus-visible {
+                outline: 2px solid rgba(61, 220, 151, 0.6);
+                outline-offset: -2px;
+        }
+
+        /* ---------- MFA: six-box code entry (prototype) ---------- */
+        .oform--otp {
+                margin-top: 12px;
+        }
+
+        .ootp {
+                display: flex;
+                gap: 7px;
+        }
+
+        .ootp input {
+                width: 100%;
+                min-width: 0;
+                height: 40px;
+                padding: 0;
+                text-align: center;
+                font-family: var(--mono);
+                font-size: 16px;
+                font-weight: 600;
+                color: var(--text);
+                background: #080c11;
+                border: 1px solid var(--line-hi);
+                border-radius: 8px;
+                outline: none;
+                caret-color: var(--accent);
+                transition:
+                        border-color 0.15s,
+                        box-shadow 0.15s,
+                        background 0.15s;
+        }
+
+        .ootp input:hover {
+                border-color: #3a4a5c;
+        }
+
+        .ootp input:focus {
+                border-color: var(--accent);
+                box-shadow: 0 0 0 3px rgba(61, 220, 151, 0.14);
+        }
+
+        .ootp.invalid input {
+                border-color: rgba(255, 107, 107, 0.65);
+                background: #150e10;
+        }
+
+        .ootp.invalid input:focus {
+                box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.16);
+        }
+
+        .ootp.shake {
+                animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+        }
+
+        @keyframes shake {
+                10%,
+                90% {
+                        transform: translateX(-2px);
+                }
+                20%,
+                80% {
+                        transform: translateX(3px);
+                }
+                30%,
+                50%,
+                70% {
+                        transform: translateX(-5px);
+                }
+                40%,
+                60% {
+                        transform: translateX(5px);
+                }
+        }
+
+        .oerr--code {
+                margin-top: 7px;
+                align-items: flex-start;
+                line-height: 1.5;
+        }
+
+        .oerr--code svg {
+                flex: 0 0 auto;
+                margin-top: 1px;
+        }
+
+        /* ---------- MFA: success view (prototype) ---------- */
+        .osuccess {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                text-align: center;
+                padding: 18px 8px 10px;
+                animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+        }
+
+        .osuccess__badge {
+                width: 46px;
+                height: 46px;
+                margin: 0 auto 14px;
+                border-radius: 50%;
+                display: grid;
+                place-items: center;
+                background: rgba(61, 220, 151, 0.1);
+                border: 1px solid rgba(61, 220, 151, 0.35);
+                color: var(--accent);
+        }
+
+        .osuccess h2 {
+                margin: 0 0 6px;
+                font-size: 16px;
+                font-weight: 650;
+                letter-spacing: -0.01em;
+        }
+
+        .osuccess p {
+                margin: 0 auto 18px;
+                max-width: 38ch;
+                color: var(--muted);
+                font-size: 11.5px;
+                line-height: 1.6;
+        }
+
+        .obtn--slim {
+                max-width: 240px;
+                margin: 0 auto;
         }
 
         .ocodes-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-                gap: 8px;
+                grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+                gap: 7px;
                 margin-top: 4px;
         }
 
         .ocode-chip {
                 font-family: var(--mono);
-                font-size: 15px;
+                font-size: 13px;
                 background: #080c11;
                 border: 1px solid var(--line);
                 border-radius: 8px;
-                padding: 8px 10px;
+                padding: 7px 9px;
                 text-align: center;
                 letter-spacing: 0.08em;
                 color: #cfe0ee;
@@ -1756,13 +2170,13 @@
                 flex-direction: column;
                 align-items: center;
                 text-align: center;
-                padding: 16px 0 8px;
+                padding: 14px 0 6px;
                 animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
         }
 
         .odone__icon {
-                width: 58px;
-                height: 58px;
+                width: 48px;
+                height: 48px;
                 border-radius: 50%;
                 display: grid;
                 place-items: center;
@@ -1770,18 +2184,18 @@
                 background: radial-gradient(circle, rgba(61, 220, 151, 0.22), rgba(61, 220, 151, 0.05));
                 border: 1px solid rgba(61, 220, 151, 0.4);
                 box-shadow: 0 0 44px -8px rgba(61, 220, 151, 0.7);
-                margin-bottom: 18px;
+                margin-bottom: 14px;
         }
 
         .odone h2 {
                 margin: 0;
-                font-size: 19px;
+                font-size: 16px;
                 font-weight: 600;
         }
 
         .odone p {
                 margin: 8px 0 0;
-                font-size: 13.5px;
+                font-size: 11.5px;
                 line-height: 1.65;
                 color: var(--muted);
                 max-width: 44ch;
@@ -1797,7 +2211,7 @@
         }
 
         .oskip-row__text {
-                font-size: 12.25px;
+                font-size: 10.75px;
                 color: var(--dim);
         }
 
@@ -1811,7 +2225,7 @@
 
         .owarn {
                 margin-top: 4px;
-                padding: 12px 14px;
+                padding: 10px 12px;
                 border: 1px solid rgba(255, 180, 84, 0.4);
                 background: rgba(255, 180, 84, 0.07);
                 border-radius: 10px;
@@ -1820,22 +2234,22 @@
 
         .owarn__title {
                 margin: 0;
-                font-size: 13.5px;
+                font-size: 11.5px;
                 font-weight: 700;
                 color: var(--warn);
         }
 
         .owarn__list {
                 margin: 6px 0 0;
-                padding-left: 18px;
-                font-size: 12.75px;
+                padding-left: 16px;
+                font-size: 11px;
                 line-height: 1.55;
                 color: var(--muted);
         }
 
         .owarn__note {
                 margin: 6px 0 0;
-                font-size: 12.25px;
+                font-size: 10.75px;
                 line-height: 1.5;
                 color: var(--dim);
         }
@@ -1843,13 +2257,13 @@
         .owarn__actions {
                 display: flex;
                 flex-direction: column;
-                gap: 8px;
-                margin-top: 10px;
+                gap: 7px;
+                margin-top: 8px;
         }
 
         .ocheck-row--tight {
                 margin-top: 8px;
-                font-size: 12.75px;
+                font-size: 11px;
         }
 
         .obtn--danger {
@@ -1877,7 +2291,7 @@
                 display: flex;
                 flex-direction: column;
                 gap: 3px;
-                padding: 11px 12px;
+                padding: 9px 10px;
                 border: 1px solid var(--line);
                 border-radius: 10px;
                 background: #080c11;
@@ -1905,13 +2319,13 @@
         }
 
         .ochoice__title {
-                font-size: 13px;
+                font-size: 11.5px;
                 font-weight: 600;
                 color: var(--text);
         }
 
         .ochoice__sub {
-                font-size: 11.75px;
+                font-size: 10.25px;
                 line-height: 1.45;
                 color: var(--dim);
         }
@@ -1923,7 +2337,7 @@
 
         .oapplied {
                 margin-top: 4px;
-                padding: 11px 13px;
+                padding: 9px 11px;
                 border: 1px solid rgba(61, 220, 151, 0.35);
                 background: rgba(61, 220, 151, 0.07);
                 border-radius: 10px;
@@ -1932,7 +2346,7 @@
 
         .oapplied p {
                 margin: 0 0 10px;
-                font-size: 12.75px;
+                font-size: 11px;
                 line-height: 1.55;
                 color: var(--muted);
         }
@@ -1950,12 +2364,29 @@
                 }
 
                 .obcard {
-                        padding: 16px 14px 14px;
-                        border-radius: 13px;
+                        padding: 13px 12px 12px;
+                        border-radius: 11px;
                 }
 
-                .ohead {
-                        gap: 10px;
+                .otopbar {
+                        gap: 8px;
+                }
+
+                .oqr-row {
+                        flex-direction: column;
+                }
+
+                .oqr {
+                        align-self: center;
+                }
+
+                .ootp {
+                        gap: 5px;
+                }
+
+                .ootp input {
+                        height: 36px;
+                        font-size: 14px;
                 }
 
                 .ometer-row {
@@ -1975,6 +2406,7 @@
                 .obcard::before,
                 .otoken-row,
                 .otoken-row__badge,
+                .ootp.shake,
                 .odone,
                 .odone__icon {
                         animation-duration: 0.001ms !important;

@@ -290,6 +290,11 @@ EOF
         local rc=$?
         [[ $rc -eq 0 ]] && pass "installer exited 0" || { fail "exit $rc"; sed -n '1,60p' "$sandbox/install_https.log"; return; }
         grep -q "OPEN DREVANTA IN YOUR BROWSER" "$sandbox/install_https.log" && pass "§6 HTTPS success screen" || fail "no HTTPS success screen"
+        # Sprint 3.0: the link block is framed by light horizontal rules so
+        # it stands out from the surrounding copy in terminal output.
+        local rules
+        rules="$(sed -n '/INSTALLED SUCCESSFULLY/,/━━━━━━━/p' "$sandbox/install_https.log" | grep -c '──────')"
+        [[ "$rules" -ge 2 ]] && pass "link block framed by divider rules" || fail "expected 2 divider rules, got $rules"
         grep -qE "https://23\.20\.15\.8/onboarding\#token=[A-Za-z0-9_-]{44}" "$sandbox/install_https.log" \
                 && pass "setup link uses the public HTTPS address" || fail "HTTPS setup link wrong"
         # Sprint 2.9: the customer-facing success screen shows ONLY the
