@@ -7,6 +7,7 @@
                 applyDomain,
                 checkDomain,
                 fetchAccessStatus,
+                fetchMetrics,
                 fetchOnboardingStatus,
                 postJSON,
                 skipMfa,
@@ -88,6 +89,10 @@
         let copyDone = $state(false);
         let copyTimer: ReturnType<typeof setTimeout> | undefined;
         let continueEl = $state<HTMLButtonElement | null>(null);
+        // Manual-entry secret: masked by default, explicit Reveal toggle.
+        // Copy always copies the real secret regardless of the mask.
+        let secretRevealed = $state(false);
+        let mfaHelpOpen = $state(false);
 
         // --- recovery codes --------------------------------------------------
         let recoveryCodes = $state<string[]>([]);
@@ -142,6 +147,17 @@
         // Grouped 4-4-4 display of the base32 secret; the copy button copies
         // the ungrouped value the authenticator expects.
         const secretDisplay = $derived(totpSecret.replace(/(.{4})/g, '$1 ').trim());
+        // Masked presentation: the same 4-character grouping as the real
+        // secret with dots instead of characters, so the field keeps its
+        // size whether hidden or revealed.
+        const secretMaskedDisplay = $derived.by(() => {
+                if (!totpSecret) return '';
+                const groups = Math.ceil(totpSecret.length / 4);
+                return new Array(groups).fill('••••').join(' ');
+        });
+        // The copyable Host / Name value in the DNS instructions panel.
+        // (Points to is derived below, after serverIp is declared.)
+        const dnsHostValue = $derived(dnsHostFor(domainInput.trim().toLowerCase()));
 
         const domainErr = $derived(domainHint(domainInput));
         // The verification counts only while the input still IS the verified
@@ -163,6 +179,12 @@
                 const host = access?.https?.host ?? '';
                 return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) ? host : '';
         });
+        // The copyable "Points to" value in the DNS instructions panel:
+        // the IPs the DNS check resolved expectations from, else the
+        // trusted server IP.
+        const dnsPointsValue = $derived(
+                dnsCheckResult?.expected?.join(', ') || serverIp || 'your server public IP'
+        );
 
         // Approved v6 step meta ("Initial setup · Step 1 of 4", ...).
         const stepMeta = $derived.by(() => {
@@ -188,7 +210,6 @@
                 if (domainApplied) return 'https://' + domainApplied;
                 return serverIp ? 'https://' + serverIp : '';
         });
-        const finalMfa = $derived(mfaDone ? 'MFA enabled' : 'MFA skipped');
 
         $effect(() => {
                 if (statusChecked) return;
@@ -200,6 +221,19 @@
                 fetchAccessStatus()
                         .then((a) => (access = { mode: a.mode, https: a.https ?? null }))
                         .catch(() => (access = null));
+        });
+
+        // Pasted setup link (…#token=drv1_…) while the page is already open:
+        // changing only the URL fragment does not reload the document and the
+        // client router does not navigate, so the token must be adopted in
+        // place on hashchange. Only the claim step consumes it — on any later
+        // step the token was already used or is not applicable.
+        $effect(() => {
+                const onHashChange = () => {
+                        if (step === 'claim') consumeSetupLinkToken();
+                };
+                window.addEventListener('hashchange', onHashChange);
+                return () => window.removeEventListener('hashchange', onHashChange);
         });
 
         function announce(msg: string) {
@@ -530,6 +564,29 @@
                 copyTimer = setTimeout(() => (copyDone = false), 1800);
         }
 
+        // Copy one of the DNS instructions panel values (Host / Name or
+        // Points to). Same transient "Copied" pattern as the setup key.
+        let dnsCopied = $state<'host' | 'ip' | ''>('');
+        let dnsCopyTimer: ReturnType<typeof setTimeout> | undefined;
+        async function copyDnsValue(kind: 'host' | 'ip', value: string) {
+                if (!value || value === 'your server public IP') return;
+                try {
+                        await navigator.clipboard.writeText(value);
+                } catch {
+                        const ta = document.createElement('textarea');
+                        ta.value = value;
+                        ta.style.position = 'fixed';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        ta.remove();
+                }
+                dnsCopied = kind;
+                clearTimeout(dnsCopyTimer);
+                dnsCopyTimer = setTimeout(() => (dnsCopied = ''), 1800);
+        }
+
         async function submitTotp(e: SubmitEvent) {
                 e.preventDefault();
                 const code = otpDigits.join('');
@@ -593,7 +650,7 @@
         /** Default path: keep the server-IP address, no extra setup. */
         function proceedWithIp() {
                 step = 'done';
-                setTimeout(() => goto('/', { replaceState: true }), 1200);
+                void loadDoneStats();
         }
 
         /** Reset every DNS/HTTPS state — used when the domain input changes. */
@@ -691,7 +748,43 @@
 
         function finishDomain() {
                 step = 'done';
-                setTimeout(() => goto('/', { replaceState: true }), 1200);
+                void loadDoneStats();
+        }
+
+        // --- completion summary (checklist + live server stats) ------------
+        // The dashboard's own metrics endpoint, fetched once on entering the
+        // done step: the onboarding session has full scope by then. Stats are
+        // display-only — failures leave the row as em-dashes.
+        let doneStats = $state<{ cpu: string; mem: string; disk: string; at: string } | null>(null);
+        function fmtBytes(n: number): string {
+                if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(1) + ' GiB';
+                if (n >= 1024 ** 2) return Math.round(n / 1024 ** 2) + ' MiB';
+                return Math.round(n / 1024) + ' KiB';
+        }
+        async function loadDoneStats() {
+                doneStats = null;
+                try {
+                        const m = await fetchMetrics();
+                        const disk = m.disk && m.disk.length > 0 ? m.disk[0] : null;
+                        doneStats = {
+                                cpu: Math.round(m.cpu.usage_percent) + '%',
+                                mem: Math.round(m.memory.used_percent) + '% / ' + fmtBytes(m.memory.total_bytes),
+                                disk:
+                                        (disk ? fmtBytes(disk.used_bytes) : '—') +
+                                        ' / ' +
+                                        (disk ? fmtBytes(disk.total_bytes) : '—'),
+                                at: new Date().toLocaleTimeString([], {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        second: '2-digit'
+                                })
+                        };
+                } catch {
+                        doneStats = null;
+                }
+        }
+        function gotoDashboard() {
+                void goto('/', { replaceState: true });
         }
 
         async function copyCodes() {
@@ -1050,16 +1143,36 @@
                                                 <div class="oqr-copy">
                                                         <strong>Scan with your app</strong>
                                                         <p>Google Authenticator, Microsoft Authenticator, or another TOTP app.</p>
-                                                        <details class="omfa-help">
-                                                                <summary>How does this work?</summary>
-                                                                <p>In your authenticator app, tap <strong>Add account</strong>, scan the QR code, then enter the six-digit code shown in the app.</p>
-                                                                <p>Need an authenticator app? Get Google Authenticator from the <a href="https://play.google.com/store/apps/details?id=com.google.android.apps.authenticator2" target="_blank" rel="noopener noreferrer">Google Play Store</a> or the <a href="https://apps.apple.com/app/google-authenticator/id388497605" target="_blank" rel="noopener noreferrer">Apple App Store</a>.</p>
-                                                        </details>
+                                                        <button
+                                                                type="button"
+                                                                class="olinkbtn"
+                                                                aria-expanded={mfaHelpOpen}
+                                                                aria-controls="mfa-help"
+                                                                onclick={() => (mfaHelpOpen = !mfaHelpOpen)}
+                                                        >
+                                                                {mfaHelpOpen ? 'Hide help' : 'How does this work?'}
+                                                        </button>
                                                 </div>
+                                        </div>
+                                        <div class="omfa-help" id="mfa-help" hidden={!mfaHelpOpen}>
+                                                <p>In your authenticator app, tap <strong>Add account</strong>, scan the QR code, then enter the six-digit code shown in the app.</p>
+                                                <p>Need an authenticator app? Get Google Authenticator from the <a href="https://play.google.com/store/apps/details?id=com.google.android.apps.authenticator2" target="_blank" rel="noopener noreferrer">Google Play Store</a> or the <a href="https://apps.apple.com/app/google-authenticator/id388497605" target="_blank" rel="noopener noreferrer">Apple App Store</a>.</p>
                                         </div>
                                         <div class="odivider"></div>
                                         <div class="olabel-row">
                                                 <span class="olabel" id="setup-key-label">Secret (manual entry)</span>
+                                                <button
+                                                        type="button"
+                                                        class="okey-field__copy"
+                                                        aria-pressed={secretRevealed}
+                                                        aria-controls="setup-key"
+                                                        onclick={() => (secretRevealed = !secretRevealed)}
+                                                >
+                                                        {secretRevealed ? 'Hide' : 'Reveal'}
+                                                </button>
+                                        </div>
+                                        <div class="okey-field">
+                                                <code id="setup-key" aria-labelledby="setup-key-label">{secretRevealed ? secretDisplay : secretMaskedDisplay}</code>
                                                 <button
                                                         type="button"
                                                         class="okey-field__copy"
@@ -1069,9 +1182,6 @@
                                                 >
                                                         {copyDone ? 'Copied' : 'Copy'}
                                                 </button>
-                                        </div>
-                                        <div class="okey-field">
-                                                <code id="setup-key" aria-labelledby="setup-key-label">{secretDisplay}</code>
                                         </div>
                                 </div>
 
@@ -1290,8 +1400,20 @@
                                                 <strong>Domain not connected yet</strong>
                                                 <p class="odns-instructions__lead">At your domain's DNS provider, create or update the record below, then refresh verification.</p>
                                                 <div class="odns-row"><span>Type</span><strong>A</strong></div>
-                                                <div class="odns-row"><span>Host / Name</span><strong class="mono">{dnsHostFor(domainInput.trim().toLowerCase())}</strong></div>
-                                                <div class="odns-row"><span>Points to</span><strong class="mono">{dnsCheckResult.expected?.join(', ') || serverIp || 'your server public IP'}</strong></div>
+                                                <div class="odns-row">
+                                                        <span>Host / Name</span>
+                                                        <strong class="mono">{dnsHostValue}</strong>
+                                                        <button type="button" class="orow-copy" aria-label="Copy host name" onclick={() => copyDnsValue('host', dnsHostValue)}>
+                                                                {dnsCopied === 'host' ? 'Copied' : 'Copy'}
+                                                        </button>
+                                                </div>
+                                                <div class="odns-row">
+                                                        <span>Points to</span>
+                                                        <strong class="mono">{dnsPointsValue}</strong>
+                                                        <button type="button" class="orow-copy" aria-label="Copy IP address" onclick={() => copyDnsValue('ip', dnsPointsValue)}>
+                                                                {dnsCopied === 'ip' ? 'Copied' : 'Copy'}
+                                                        </button>
+                                                </div>
                                                 <p class="odns-instructions__note">The host name depends on your DNS provider and zone. Remove conflicting records if needed. DNS updates may take time.</p>
                                                 <div class="oactions">
                                                         <button class="obtn obtn--secondary" type="button" disabled={domainBusy || domainErr !== ''} onclick={submitDomainCheck}>
@@ -1327,16 +1449,47 @@
                                         </svg>
                                 </div>
                                 <h2>You're all set</h2>
-                                <p>Onboarding is complete. Opening the dashboard…</p>
+                                <p>Onboarding is complete.</p>
                                 <div class="opanel odone__panel">
-                                        <div class="orow">
-                                                <span class="orow__label">Access</span>
-                                                <code class="orow__value">{finalAddress || accessPill}</code>
+                                        <div class="odone__row">
+                                                <span class="odone__mark is-done" aria-hidden="true">
+                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                </span>
+                                                <span class="odone__name">Admin credentials</span>
+                                                <span class="odone__val">Completed</span>
                                         </div>
-                                        <div class="orow">
-                                                <span class="orow__label">Account security</span>
-                                                <span class="orow__value">{finalMfa}</span>
+                                        <div class="odone__row">
+                                                {#if mfaDone}
+                                                        <span class="odone__mark is-done" aria-hidden="true">
+                                                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                        </span>
+                                                        <span class="odone__name">MFA authentication</span>
+                                                        <span class="odone__val">Account secured</span>
+                                                {:else}
+                                                        <span class="odone__mark is-skip" aria-hidden="true">
+                                                                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                                                        </span>
+                                                        <span class="odone__name">MFA authentication</span>
+                                                        <span class="odone__val">Not set — secure your account in Settings</span>
+                                                {/if}
                                         </div>
+                                        <div class="odone__row">
+                                                <span class="odone__mark is-done" aria-hidden="true">
+                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+                                                </span>
+                                                <span class="odone__name">Domain configuration</span>
+                                                <span class="odone__val mono">{finalAddress || serverIp || accessPill}</span>
+                                        </div>
+                                        <div class="odivider"></div>
+                                        <div class="odone__stats mono">
+                                                <span>cpu: {doneStats ? doneStats.cpu : '—'}</span>
+                                                <span>memory: {doneStats ? doneStats.mem : '—'}</span>
+                                                <span>disk: {doneStats ? doneStats.disk : '—'}</span>
+                                        </div>
+                                        {#if doneStats}
+                                                <p class="odone__updated">Updated at: {doneStats.at}</p>
+                                        {/if}
+                                        <button class="obtn odone__proceed" type="button" onclick={gotoDashboard}>Proceed to dashboard →</button>
                                 </div>
                         </section>
                 {/if}
@@ -1400,10 +1553,14 @@
                 display: none !important;
         }
 
+        /* font only: `color: inherit` here would out-specify every button's
+           own color rule (`.ob.svelte-x button` = 0,2,1 beats `.obtn.svelte-x`
+           = 0,2,0) and rendered every primary button's text white instead of
+           the prototype's near-black #0b2923. Every button/input class sets
+           its own color explicitly. */
         .ob button,
         .ob input {
                 font: inherit;
-                color: inherit;
         }
 
         .ob button {
@@ -2029,21 +2186,26 @@
         }
 
         .omfa-help {
+                /* Help block below the QR row (prototype MFA screen): the two
+                   instructional paragraphs live under the QR, toggled from
+                   the copy block's "How does this work?" button. */
+                margin-top: 10px;
+                padding: 9px 11px;
+                background: var(--raised);
+                border: 1px solid var(--line-soft);
+                border-radius: 8px;
                 font-size: 11px;
                 color: var(--muted);
-                margin: 7px 0 0;
-        }
-
-        .omfa-help summary {
-                color: var(--accent);
-                cursor: pointer;
-                font-weight: 650;
-                font-size: 12px;
+                text-align: left;
         }
 
         .omfa-help p {
-                margin: 6px 0 0;
+                margin: 0;
                 line-height: 1.5;
+        }
+
+        .omfa-help p + p {
+                margin-top: 6px;
         }
 
         .omfa-help a {
@@ -2069,7 +2231,9 @@
                 font-family: var(--mono);
                 font-size: 12px;
                 color: var(--text);
-                overflow-wrap: anywhere;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
         }
 
         .okey-field__copy {
@@ -2410,8 +2574,26 @@
         }
 
         .odns-row strong {
+                flex: 1 1 auto;
+                min-width: 0;
                 font-weight: 650;
                 overflow-wrap: anywhere;
+        }
+
+        /* Copy buttons inside the DNS instructions rows and the setup-key
+           field: bare accent text, transient "Copied" feedback. */
+        .orow-copy {
+                flex: 0 0 auto;
+                background: none;
+                border: 0;
+                padding: 2px 4px;
+                color: var(--accent);
+                font-size: 11px;
+                font-weight: 650;
+        }
+
+        .orow-copy:hover {
+                text-decoration: underline;
         }
 
         .mono {
@@ -2523,29 +2705,75 @@
                 text-align: left;
         }
 
-        .orow {
+        /* Completion checklist: one row per completed (or skipped) piece
+           of the setup, then live server stats and a proceed action. */
+        .odone__row {
                 display: flex;
                 align-items: center;
-                justify-content: space-between;
-                gap: 10px;
+                gap: 8px;
+                padding: 7px 0;
+                border-bottom: 1px solid var(--line-soft);
                 font-size: 11.5px;
         }
 
-        .orow + .orow {
-                margin-top: 10px;
+        .odone__row:last-of-type {
+                border-bottom: 0;
         }
 
-        .orow__label {
+        .odone__mark {
+                flex: 0 0 auto;
+                width: 16px;
+                height: 16px;
+                border-radius: 50%;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+        }
+
+        .odone__mark.is-done {
+                background: var(--accent-deep);
+                border: 1px solid var(--accent);
+                color: var(--accent);
+        }
+
+        .odone__mark.is-skip {
+                background: rgba(226, 187, 126, 0.12);
+                border: 1px solid rgba(226, 187, 126, 0.55);
+                color: var(--warn);
+        }
+
+        .odone__name {
+                flex: 1 1 auto;
+                min-width: 0;
+                font-weight: 650;
+        }
+
+        .odone__val {
+                flex: 0 1 auto;
+                min-width: 0;
                 color: var(--muted);
-                font-size: 11px;
+                text-align: right;
+                overflow-wrap: anywhere;
         }
 
-        .orow__value {
-                font-family: var(--mono);
+        .odone__stats {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px 14px;
+                margin-top: 10px;
                 font-size: 11px;
-                color: var(--text);
-                overflow-wrap: anywhere;
-                text-align: right;
+                color: var(--dim);
+        }
+
+        .odone__updated {
+                margin: 4px 0 0;
+                font-size: 10px;
+                letter-spacing: 0.1px;
+                color: var(--dim);
+        }
+
+        .odone__proceed {
+                margin-top: 10px;
         }
 
         /* ---------- small print + disclosure ---------- */

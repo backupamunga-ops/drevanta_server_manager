@@ -71,6 +71,15 @@ warn() { printf '\033[1;33mWARN\033[0m %s\n' "$*"; }
 error() { printf '\033[1;31mERROR\033[0m %s\n' "$*" >&2; }
 die()  { error "$*"; exit 1; }
 
+# print_link URL — emit URL as an OSC 8 terminal hyperlink so modern
+# terminals (Windows Terminal, GNOME Terminal, iTerm2, Kitty, …) render
+# it clickable. Terminals without OSC 8 support discard the unknown
+# sequence and still show the URL as plain text, so the fallback is
+# lossless in every case.
+print_link() {
+        printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$1" "$1"
+}
+
 on_error() {
         local exit_code=$?
         printf '\n\033[1;31mInstallation failed at step: %s (exit %d)\033[0m\n' "${STEP:-unknown}" "$exit_code" >&2
@@ -308,6 +317,24 @@ create_service_user() {
         fi
 }
 
+# The optional custom-domain overlay directory: the unprivileged daemon
+# writes the secret-free domain.json here and the proxy worker reads it.
+# The daemon unit also declares it as StateDirectory (created + owned by
+# the service user + writable under ProtectSystem=strict); creating it
+# here as well keeps non-systemd/dev-container installs and manual
+# domain applies working from the first minute. Idempotent.
+prepare_overlay_dir() {
+        STEP="prepare domain overlay directory"
+        local overlay_dir="${DREVANTA_ACCESS_OVERLAY_DIR:-/var/lib/drevanta-access}"
+        if install -d -m 0755 -o "$DAEMON_USER" -g "$DAEMON_USER" "$overlay_dir" 2>/dev/null; then
+                ok "domain overlay directory ready: $overlay_dir"
+        elif mkdir -p "$overlay_dir" 2>/dev/null && chmod 0755 "$overlay_dir" 2>/dev/null; then
+                ok "domain overlay directory ready: $overlay_dir (ownership via systemd StateDirectory)"
+        else
+                warn "could not pre-create $overlay_dir — systemd StateDirectory will create it at service start"
+        fi
+}
+
 install_release() {
         STEP="install release"
         local bin="$1" version="$2"
@@ -411,7 +438,7 @@ LimitNOFILE=4096
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-StateDirectory=drevanta
+StateDirectory=drevanta drevanta-access
 
 # --- Privilege / kernel surface ---
 NoNewPrivileges=yes
@@ -580,8 +607,9 @@ EOF
   reconnect with the command above or open a second local terminal.)
 
   Then open:
-
-  ${link}
+EOF
+        print_link "$link"
+        cat <<EOF
 
   Token expires in ${ttl_disp}.
   This link can be used only once.
@@ -627,8 +655,9 @@ print_https_success_screen() {
   ────────────────────────────────────────────────────────────
 
   OPEN DREVANTA IN YOUR BROWSER
-
-  https://${HTTPS_HOST}/onboarding#token=${token}
+EOF
+        print_link "https://${HTTPS_HOST}/onboarding#token=${token}"
+        cat <<EOF
 
   ────────────────────────────────────────────────────────────
 
@@ -863,6 +892,7 @@ main() {
         version="$(bin_version "$bin")"
         log "Installing Drevanta $version"
         create_service_user
+        prepare_overlay_dir
         migrate_legacy_layout
         install_release "$bin" "$version"
         write_unit "$version"
