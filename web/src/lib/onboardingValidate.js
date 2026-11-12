@@ -16,8 +16,12 @@ export const USERNAME_MIN = 3;
 export const USERNAME_MAX = 32;
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 128;
+export const EMAIL_MAX = 254;
 
 const USERNAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+// Same pragmatic shape the daemon accepts: something@something.tld,
+// no whitespace, a dot TLD of at least 2 characters.
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/;
 
 /**
  * @param {unknown} v - raw username input
@@ -47,6 +51,19 @@ export function passwordError(v, username) {
         if (p.length > PASSWORD_MAX) return 'Keep it to 128 characters or fewer.';
         const u = typeof username === 'string' ? username.trim().toLowerCase() : '';
         if (u !== '' && p.toLowerCase() === u) return 'Password cannot match your username.';
+        return '';
+}
+
+/**
+ * @param {unknown} v - raw email input (required at admin creation: it is
+ *   the second login identifier and the future password-reset target)
+ * @returns {string} error message, or '' when valid
+ */
+export function emailError(v) {
+        const e = typeof v === 'string' ? v.trim() : '';
+        if (e === '') return 'Add an email — it works as a login identifier too.';
+        if (e.length > EMAIL_MAX) return 'Keep it to 254 characters or fewer.';
+        if (!EMAIL_RE.test(e)) return 'That doesn\u2019t look like an email address.';
         return '';
 }
 

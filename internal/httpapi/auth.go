@@ -159,6 +159,7 @@ type claimRequest struct {
 	Token    string `json:"token"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Email    string `json:"email"`
 }
 
 func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
@@ -183,11 +184,12 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Token == "" || !validUsername(req.Username) || !validPassword(req.Password) {
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Token == "" || !validUsername(req.Username) || !validPassword(req.Password) || !validEmail(req.Email) {
 		audit(r.Context(), s.st, "onboarding", "claim_rejected", "claim",
 			map[string]any{"reason": "invalid_input"})
 		writeError(w, http.StatusBadRequest, "invalid_input",
-			"token required, username 3-32 chars [a-zA-Z0-9._-], password at least 12 chars")
+			"token required, username 3-32 chars [a-zA-Z0-9._-], password at least 12 chars, a valid email address")
 		return
 	}
 
@@ -220,7 +222,7 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not hash password")
 		return
 	}
-	user, err := s.st.CreateUser(r.Context(), req.Username, passwordHash)
+	user, err := s.st.CreateUser(r.Context(), req.Username, passwordHash, req.Email)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeError(w, http.StatusConflict, "username_taken", "username already exists")
@@ -608,7 +610,8 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.st.UserByUsername(r.Context(), req.Username)
+	// The identifier may be the username or the account email.
+	user, err := s.st.UserByIdentifier(r.Context(), strings.TrimSpace(req.Username))
 	if errors.Is(err, store.ErrNotFound) {
 		audit(r.Context(), s.st, req.Username, "login_failed", "auth", map[string]any{"reason": "invalid_credentials"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")

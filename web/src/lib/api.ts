@@ -221,6 +221,36 @@ export function fetchAccountMfa(): Promise<AccountMfaStatus> {
         return getJSON<AccountMfaStatus>('/api/v1/account/mfa');
 }
 
+// --- Account profile (email + password) ---
+
+export interface AccountProfile {
+        username: string;
+        email: string;
+}
+
+export function fetchAccountProfile(): Promise<AccountProfile> {
+        return getJSON<AccountProfile>('/api/v1/account/profile');
+}
+
+export function setAccountEmail(email: string): Promise<{ ok: boolean; email: string }> {
+        return postJSON<{ ok: boolean; email: string }>('/api/v1/account/email', { email });
+}
+
+export interface PasswordChangeResult {
+        ok: boolean;
+        other_sessions_ended: number;
+}
+
+export function changeAccountPassword(
+        currentPassword: string,
+        newPassword: string
+): Promise<PasswordChangeResult> {
+        return postJSON<PasswordChangeResult>('/api/v1/account/password', {
+                current_password: currentPassword,
+                new_password: newPassword
+        });
+}
+
 export function accountMfaSetup(): Promise<MfaSetup> {
         return postJSON<MfaSetup>('/api/v1/account/mfa/setup', {});
 }

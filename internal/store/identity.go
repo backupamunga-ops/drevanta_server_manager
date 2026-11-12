@@ -38,10 +38,15 @@ var ErrNotFound = errors.New("not found")
 // issuance is attempted after the first owner exists.
 var ErrAlreadyClaimed = errors.New("instance already claimed")
 
+// ErrEmailTaken is returned when an email is already bound to another
+// account (case-insensitive).
+var ErrEmailTaken = errors.New("email already in use")
+
 // User is one operator account.
 type User struct {
 	ID           int64
 	Username     string
+	Email        string
 	PasswordHash string
 	MFASecret    string
 	MFAEnabled   bool
@@ -203,13 +208,14 @@ WHERE id = 1 AND status = ?`, mfaMode, now, now, StatusActive)
 // Users
 // ---------------------------------------------------------------------------
 
-// CreateUser inserts an administrator account.
-func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (User, error) {
+// CreateUser inserts an administrator account. email may be empty (the
+// operator can set it later from Account settings).
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, email string) (User, error) {
 	var u User
 	now := nowStr()
 	res, err := s.db.ExecContext(ctx, `
-INSERT INTO users (username, password_hash, created_at, updated_at)
-VALUES (?, ?, ?, ?)`, username, passwordHash, now, now)
+INSERT INTO users (username, password_hash, email, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)`, username, passwordHash, email, now, now)
 	if err != nil {
 		return u, fmt.Errorf("create user: %w", err)
 	}
@@ -227,7 +233,7 @@ func scanUser(row interface{ Scan(...any) error }) (User, error) {
 		mfaLastStep  sql.NullInt64
 		created, upd string
 	)
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.MFASecret, &mfaEnabled, &mfaLastStep, &created, &upd)
+	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.MFASecret, &mfaEnabled, &mfaLastStep, &created, &upd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
 	}
@@ -241,7 +247,7 @@ func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	return u, nil
 }
 
-const userCols = `id, username, password_hash, mfa_secret, mfa_enabled, mfa_last_step, created_at, updated_at`
+const userCols = `id, username, email, password_hash, mfa_secret, mfa_enabled, mfa_last_step, created_at, updated_at`
 
 // UserByID fetches one account.
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
@@ -261,6 +267,53 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 		return u, fmt.Errorf("user %q: %w", username, err)
 	}
 	return u, nil
+}
+
+// UserByIdentifier fetches one account by username OR by email
+// (case-insensitive). The email match only considers non-empty emails,
+// so an empty identifier column can never resolve.
+func (s *Store) UserByIdentifier(ctx context.Context, ident string) (User, error) {
+	u, err := scanUser(s.db.QueryRowContext(ctx,
+		`SELECT `+userCols+` FROM users
+		 WHERE username = ? OR (email != '' AND lower(email) = lower(?))`, ident, ident))
+	if err != nil {
+		return u, fmt.Errorf("user %q: %w", ident, err)
+	}
+	return u, nil
+}
+
+// SetUserEmail binds (or clears, with "") the account email. It fails
+// with ErrEmailTaken when another account already holds the address.
+func (s *Store) SetUserEmail(ctx context.Context, userID int64, email string) error {
+	if email != "" {
+		var other int64
+		err := s.db.QueryRowContext(ctx,
+			`SELECT id FROM users WHERE lower(email) = lower(?) AND id != ?`, email, userID).Scan(&other)
+		if errors.Is(err, sql.ErrNoRows) {
+			// free
+		} else if err != nil {
+			return fmt.Errorf("check email: %w", err)
+		} else {
+			return ErrEmailTaken
+		}
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET email = ?, updated_at = ? WHERE id = ?`, email, nowStr(), userID)
+	if err != nil {
+		return fmt.Errorf("set email: %w", err)
+	}
+	return nil
+}
+
+// UpdatePasswordHash replaces the stored argon2id string.
+func (s *Store) UpdatePasswordHash(ctx context.Context, userID int64, passwordHash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
+		passwordHash, nowStr(), userID)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	return nil
 }
 
 // SetMFASecret stores the base32 TOTP secret (setup started, not yet enabled).
@@ -509,6 +562,21 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 		return fmt.Errorf("delete session: %w", err)
 	}
 	return nil
+}
+
+// DeleteOtherSessions ends every session of the user except keepHash
+// (used after a password change: other devices must re-authenticate).
+func (s *Store) DeleteOtherSessions(ctx context.Context, userID int64, keepHash string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE user_id = ? AND token_hash != ?`, userID, keepHash)
+	if err != nil {
+		return 0, fmt.Errorf("delete other sessions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // PruneSessions deletes expired sessions; called opportunistically.

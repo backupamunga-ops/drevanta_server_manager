@@ -39,7 +39,7 @@ func enrollAdminMFA(t *testing.T, h http.Handler, st *store.Store) (secret strin
 		t.Fatal(err)
 	}
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		`{"token":"`+token+`","username":"admin","password":"correct horse battery"}`, nil)
+		`{"token":"`+token+`","username":"admin","email":"admin@example.com","password":"correct horse battery"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -181,7 +181,7 @@ func TestLoginWithoutMFANeedsNoChallenge(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		`{"token":"`+token+`","username":"admin","password":"correct horse battery"}`, nil)
+		`{"token":"`+token+`","username":"admin","email":"admin@example.com","password":"correct horse battery"}`, nil)
 	sess := cookieOf(rec)
 	sessHdr := map[string]string{"Cookie": sess.Name + "=" + sess.Value}
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/mfa/skip",

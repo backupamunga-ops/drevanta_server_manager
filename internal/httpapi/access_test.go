@@ -32,7 +32,7 @@ func claimAsAdmin(t *testing.T, h http.Handler, st *store.Store, username string
 		t.Fatalf("claim token: %v", err)
 	}
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":%q,"password":"correct horse battery"}`, token, username), nil)
+		fmt.Sprintf(`{"token":%q,"username":%q,"email":"admin@example.com","password":"correct horse battery"}`, token, username), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
 	}

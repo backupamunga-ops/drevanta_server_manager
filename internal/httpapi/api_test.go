@@ -139,7 +139,7 @@ func TestMetricsRequiresFullSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		`{"token":"`+token+`","username":"admin","password":"correct horse battery"}`, nil)
+		`{"token":"`+token+`","username":"admin","email":"admin@example.com","password":"correct horse battery"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -195,14 +195,14 @@ func TestOnboardingJourney(t *testing.T) {
 
 	// 2. Wrong token is rejected and the instance stays unclaimed.
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		`{"token":"drv1_wrong","username":"admin","password":"correct horse battery"}`, nil)
+		`{"token":"drv1_wrong","username":"admin","email":"admin@example.com","password":"correct horse battery"}`, nil)
 	if rec.Code != http.StatusUnauthorized || errCode(decodeMap(t, rec)) != "invalid_token" {
 		t.Fatalf("wrong token: %d %v", rec.Code, decodeMap(t, rec))
 	}
 
 	// 3. Claim with the real token creates the admin and a session.
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
+		fmt.Sprintf(`{"token":%q,"username":"admin","email":"admin@example.com","password":"correct horse battery"}`, token), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -223,7 +223,7 @@ func TestOnboardingJourney(t *testing.T) {
 	// endpoint answers 409 wrong_state for everything (no token-validity
 	// oracle after the first-owner claim).
 	rec = do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"second","password":"correct horse battery"}`, token), nil)
+		fmt.Sprintf(`{"token":%q,"username":"second","email":"second@example.com","password":"correct horse battery"}`, token), nil)
 	if rec.Code != http.StatusConflict || errCode(decodeMap(t, rec)) != "wrong_state" {
 		t.Fatalf("token reuse: %d %v", rec.Code, decodeMap(t, rec))
 	}
@@ -336,7 +336,7 @@ func TestClaimStateGuards(t *testing.T) {
 	_, _ = st.CreateClaimToken(ctx, auth.TokenHash(token), time.Hour)
 
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
+		fmt.Sprintf(`{"token":%q,"username":"admin","email":"admin@example.com","password":"correct horse battery"}`, token), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d", rec.Code)
 	}
@@ -364,7 +364,7 @@ func TestClaimExpiredToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
+		fmt.Sprintf(`{"token":%q,"username":"admin","email":"admin@example.com","password":"correct horse battery"}`, token), nil)
 	if rec.Code != http.StatusUnauthorized || errCode(decodeMap(t, rec)) != "token_expired" {
 		t.Fatalf("expired token: %d %v", rec.Code, decodeMap(t, rec))
 	}
@@ -388,10 +388,10 @@ func TestWeakCredentialsRejected(t *testing.T) {
 	cases := []struct {
 		name, body string
 	}{
-		{"short password", fmt.Sprintf(`{"token":%q,"username":"admin","password":"short12"}`, token)},
+		{"short password", fmt.Sprintf(`{"token":%q,"username":"admin","email":"admin@example.com","password":"short12"}`, token)},
 		{"bad username chars", fmt.Sprintf(`{"token":%q,"username":"a b","password":"correct horse battery"}`, token)},
 		{"short username", fmt.Sprintf(`{"token":%q,"username":"ab","password":"correct horse battery"}`, token)},
-		{"empty token", `{"token":"","username":"admin","password":"correct horse battery"}`},
+		{"empty token", `{"token":"","username":"admin","email":"admin@example.com","password":"correct horse battery"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -469,7 +469,7 @@ func TestClaimTokenRegeneration(t *testing.T) {
 	}
 
 	body := func(tok, user string) string {
-		return fmt.Sprintf(`{"token":%q,"username":%q,"password":"correct horse battery"}`, tok, user)
+		return fmt.Sprintf(`{"token":%q,"username":%q,"email":"admin@example.com","password":"correct horse battery"}`, tok, user)
 	}
 
 	// The rotated-out token is refused with the generic invalid_token reason.
@@ -506,7 +506,7 @@ func TestMFAReenrolmentAfterSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := do(t, h, http.MethodPost, "/api/v1/onboarding/claim",
-		fmt.Sprintf(`{"token":%q,"username":"admin","password":"correct horse battery"}`, token), nil)
+		fmt.Sprintf(`{"token":%q,"username":"admin","email":"admin@example.com","password":"correct horse battery"}`, token), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("claim = %d: %s", rec.Code, rec.Body.String())
 	}

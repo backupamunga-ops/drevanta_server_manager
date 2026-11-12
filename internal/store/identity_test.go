@@ -29,7 +29,7 @@ func TestInstanceStateDefaultsAndTransitions(t *testing.T) {
 	}
 
 	// A real administrator account must exist before claiming (FK).
-	admin, err := s.CreateUser(ctx, "admin", "$argon2id$hash")
+	admin, err := s.CreateUser(ctx, "admin", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestSessionsLifecycle(t *testing.T) {
 	ctx := context.Background()
 	_ = s.Migrate(ctx)
 
-	admin, err := s.CreateUser(ctx, "admin", "$argon2id$hash")
+	admin, err := s.CreateUser(ctx, "admin", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -199,11 +199,11 @@ func TestRecoveryCodes(t *testing.T) {
 	ctx := context.Background()
 	_ = s.Migrate(ctx)
 
-	u1, err := s.CreateUser(ctx, "admin", "$argon2id$hash")
+	u1, err := s.CreateUser(ctx, "admin", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create u1: %v", err)
 	}
-	u2, err := s.CreateUser(ctx, "second", "$argon2id$hash")
+	u2, err := s.CreateUser(ctx, "second", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create u2: %v", err)
 	}
@@ -249,14 +249,14 @@ func TestUserCRUDAndMFAFields(t *testing.T) {
 	ctx := context.Background()
 	_ = s.Migrate(ctx)
 
-	u, err := s.CreateUser(ctx, "admin", "$argon2id$hash")
+	u, err := s.CreateUser(ctx, "admin", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if u.ID == 0 || u.Username != "admin" || u.MFAEnabled {
 		t.Fatalf("created: %+v", u)
 	}
-	if _, err := s.CreateUser(ctx, "admin", "x"); err == nil {
+	if _, err := s.CreateUser(ctx, "admin", "x", ""); err == nil {
 		t.Fatal("duplicate username accepted")
 	}
 	byName, err := s.UserByUsername(ctx, "admin")
@@ -304,7 +304,7 @@ func TestCreateClaimTokenIfUnclaimed(t *testing.T) {
 	}
 
 	// Become claimed (a real admin row is required by the FK).
-	admin, err := s.CreateUser(ctx, "owner", "$argon2id$hash")
+	admin, err := s.CreateUser(ctx, "owner", "$argon2id$hash", "")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

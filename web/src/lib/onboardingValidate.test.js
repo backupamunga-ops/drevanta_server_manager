@@ -9,6 +9,7 @@ import {
         PASSWORD_MIN,
         STRENGTH_LABELS,
         confirmError,
+        emailError,
         passwordError,
         scorePassword,
         tokenError,
@@ -118,4 +119,15 @@ test('strength labels cover every score', () => {
         assert.equal(STRENGTH_LABELS[2], 'Fair');
         assert.equal(STRENGTH_LABELS[3], 'Strong');
         assert.equal(STRENGTH_LABELS[4], 'Excellent');
+});
+
+test('emailError accepts a normal address and rejects junk', () => {
+        assert.equal(emailError('op@example.com'), '');
+        assert.equal(emailError('  op@example.com  '), '');
+        assert.equal(emailError('Op@Example.COM'), '');
+        assert.notEqual(emailError(''), '');
+        assert.notEqual(emailError('not-an-email'), '');
+        assert.notEqual(emailError('a@b'), '');
+        assert.notEqual(emailError('a b@example.com'), '');
+        assert.notEqual(emailError('a@' + 'x'.repeat(260) + '.com'), '');
 });

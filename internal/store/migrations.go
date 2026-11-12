@@ -97,6 +97,17 @@ CREATE TABLE IF NOT EXISTS recovery_codes (
 CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON recovery_codes (user_id);
 `,
 	},
+	{
+		version: 3,
+		name:    "user_email",
+		up: `
+-- Optional account email (login identifier + password-reset target).
+-- Empty means unset. Uniqueness is enforced case-insensitively over
+-- non-empty values only (partial unique index).
+ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (lower(email)) WHERE email != '';
+`,
+	},
 }
 
 // latestVersion is the highest applied-for schema version.

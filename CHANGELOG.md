@@ -4,6 +4,23 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.16] — email as a login identifier + password management
+
+### Added
+- **The administrator account now has an email.** The claim form
+  captures it (required, validated client and server side, unique
+  case-insensitively across accounts, migration 3 adds the column with
+  a partial unique index). Sign-in accepts **username or email** in the
+  same field, matched case-insensitively; the unknown-identifier error
+  stays the constant invalid-credentials message.
+- **Settings → Account**: change the email (or clear it — sign-in then
+  falls back to the username only) and **change the password**. A
+  password change requires the current password, enforces the 12–128
+  policy, and ends every OTHER session (the current device stays signed
+  in); the count of ended sessions is reported. All changes are
+  audited (`email_changed`, `email_removed`, `password_changed`,
+  `password_change_failed`).
+
 ## [0.4.15] — the sign-in survives a mobile reload: server-side MFA challenges
 
 ### Added

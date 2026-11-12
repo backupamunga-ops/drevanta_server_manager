@@ -194,8 +194,9 @@
 
                         <form class="form-col" onsubmit={submit}>
                                 <div class="field">
-                                        <label for="username">Username</label>
-                                        <input id="username" name="username" autocomplete="username" required bind:value={username} />
+                                        <label for="username">Username or email</label>
+                                        <input id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required placeholder="username or you@example.com" bind:value={username} />
+                                        <span class="hint">The administrator username, or the account email.</span>
                                 </div>
                                 <div class="field">
                                         <label for="password">Password</label>

@@ -21,6 +21,9 @@
 //	POST /api/v1/access/domain/apply       — verify + issue + route-verify, fail-safe (full scope)
 //	POST /api/v1/access/domain/remove      — clear the domain slot (full scope)
 //	GET  /api/v1/account/mfa               — MFA posture for Account Security (full scope)
+//	GET  /api/v1/account/profile           — username + email (full scope)
+//	POST /api/v1/account/email             — set/clear the account email (full scope)
+//	POST /api/v1/account/password          — change password, ends other sessions (full scope)
 //	POST /api/v1/account/mfa/setup         — begin TOTP enrolment later (full scope)
 //	POST /api/v1/account/mfa/verify        — enable MFA later, issue recovery codes (full scope)
 //	GET  /                                 — embedded SvelteKit dashboard
@@ -105,6 +108,11 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	mux.Handle("POST /api/v1/access/domain/check", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainCheck)))
 	mux.Handle("POST /api/v1/access/domain/apply", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainApply)))
 	mux.Handle("POST /api/v1/access/domain/remove", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainRemove)))
+
+	// --- Account profile (email + password management) ---
+	mux.Handle("GET /api/v1/account/profile", srv.requireFullSession(srv.handleAccountProfile))
+	mux.Handle("POST /api/v1/account/email", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountEmailSet)))
+	mux.Handle("POST /api/v1/account/password", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountPassword)))
 
 	// --- Account Security (enable MFA later) ---
 	mux.Handle("GET /api/v1/account/mfa", srv.requireFullSession(srv.handleAccountMFAStatus))

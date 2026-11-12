@@ -29,6 +29,7 @@
                 PASSWORD_MIN,
                 STRENGTH_LABELS,
                 confirmError,
+                emailError,
                 passwordError,
                 scorePassword,
                 tokenError,
@@ -64,9 +65,11 @@
         let tokenRejectMsg = $state('');
 
         let username = $state('');
+        let email = $state('');
         let password = $state('');
         let password2 = $state('');
         let userTouched = $state(false);
+        let emailTouched = $state(false);
         let pwTouched = $state(false);
         let confirmTouched = $state(false);
         let showPw = $state(false);
@@ -134,10 +137,12 @@
         // Element refs for focus management.
         let tokenEl = $state<HTMLInputElement | null>(null);
         let usernameEl = $state<HTMLInputElement | null>(null);
+        let emailEl = $state<HTMLInputElement | null>(null);
         let passwordEl = $state<HTMLInputElement | null>(null);
         let password2El = $state<HTMLInputElement | null>(null);
 
         const userErr = $derived(usernameError(username));
+        const emailErr = $derived(emailError(email));
         const pwErr = $derived(passwordError(password, username));
         const confirmErr = $derived(confirmError(password2, password));
         const tokenErr = $derived(tokenMode === 'manual' ? tokenError(token) : '');
@@ -379,6 +384,7 @@
                 e.preventDefault();
                 tokenTouched = true;
                 userTouched = true;
+                emailTouched = true;
                 pwTouched = true;
                 confirmTouched = true;
                 stepError = '';
@@ -390,6 +396,10 @@
                 }
                 if (userErr !== '') {
                         void tick().then(() => usernameEl?.focus({ preventScroll: true }));
+                        return;
+                }
+                if (emailErr !== '') {
+                        void tick().then(() => emailEl?.focus({ preventScroll: true }));
                         return;
                 }
                 if (pwErr !== '') {
@@ -406,6 +416,7 @@
                         await postJSON('/api/v1/onboarding/claim', {
                                 token: token.trim(),
                                 username: username.trim(),
+                                email: email.trim(),
                                 password
                         });
                         await beginMfaSetup();
@@ -1027,6 +1038,31 @@
                                                 onblur={() => (userTouched = true)}
                                         />
                                         <p class="oerr" id="user-err" hidden={!(userTouched && userErr !== '')}>{userErr}</p>
+                                </div>
+
+                                <div class="ofield" class:has-error={emailTouched && emailErr !== ''}>
+                                        <div class="olabel-row">
+                                                <label class="olabel" for="email">Email</label>
+                                                <span class="olabel-note">login identifier</span>
+                                        </div>
+                                        <input
+                                                class="oinput"
+                                                id="email"
+                                                name="email"
+                                                type="email"
+                                                placeholder="you@example.com"
+                                                autocomplete="email"
+                                                autocapitalize="off"
+                                                spellcheck="false"
+                                                maxlength="254"
+                                                aria-describedby="email-err email-hint"
+                                                aria-invalid={emailTouched && emailErr !== ''}
+                                                bind:value={email}
+                                                bind:this={emailEl}
+                                                onblur={() => (emailTouched = true)}
+                                        />
+                                        <p class="ohint" id="email-hint">Sign in with your username or this email. Password resets are sent here.</p>
+                                        <p class="oerr" id="email-err" hidden={!(emailTouched && emailErr !== '')}>{emailErr}</p>
                                 </div>
 
                                 <div class="ofield" class:has-error={pwTouched && pwErr !== ''}>

@@ -166,7 +166,7 @@ func TestClaimRegenerateRejectedAfterClaiming(t *testing.T) {
 	token := strings.TrimSpace(out1.String())
 
 	// Simulate the first owner having been created (claim succeeded).
-	u, err := st.CreateUser(ctx, "owner", "argon2id$test")
+	u, err := st.CreateUser(ctx, "owner", "argon2id$test", "")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
