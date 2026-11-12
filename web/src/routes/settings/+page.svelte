@@ -11,13 +11,17 @@
                 fetchAccountMfa,
                 fetchAccountProfile,
                 fetchSession,
+                fetchSmtp,
                 removeDomain,
+                saveSmtp,
                 setAccountEmail,
+                testSmtp,
                 type AccessStatus,
                 type AccountMfaStatus,
                 type AccountProfile,
                 type DomainCheckResult,
-                type MfaSetup
+                type MfaSetup,
+                type SmtpStatus
         } from '$lib/api';
         import { domainHint } from '$lib/access.js';
         import { qrSvg as renderQrCode } from '$lib/qr.js';
@@ -41,6 +45,20 @@
         let pwBusy = $state(false);
         let pwMsg = $state('');
         let pwError = $state('');
+
+        // Email delivery (SMTP): used for password-reset links and test mail.
+        let smtp = $state<SmtpStatus | null>(null);
+        let smtpEnabled = $state(false);
+        let smtpHost = $state('');
+        let smtpPort = $state(587);
+        let smtpUser = $state('');
+        let smtpPass = $state('');
+        let smtpFrom = $state('');
+        let smtpBusy = $state(false);
+        let smtpMsg = $state('');
+        let smtpError = $state('');
+        let smtpTestBusy = $state(false);
+        let smtpTestMsg = $state('');
 
         // Account Security: enable-MFA flow (same shape as onboarding).
         let mfaStage = $state<'idle' | 'setup' | 'verify' | 'codes'>('idle');
@@ -105,11 +123,23 @@
         async function reload() {
                 loadError = '';
                 try {
-                        const [m, a, p] = await Promise.all([fetchAccountMfa(), fetchAccessStatus(), fetchAccountProfile()]);
+                        const [m, a, p, mail] = await Promise.all([
+                                fetchAccountMfa(),
+                                fetchAccessStatus(),
+                                fetchAccountProfile(),
+                                fetchSmtp()
+                        ]);
                         mfa = m;
                         access = a;
                         profile = p;
                         emailInput = p.email;
+                        smtp = mail;
+                        smtpEnabled = mail.enabled;
+                        smtpHost = mail.host;
+                        smtpPort = mail.port || 587;
+                        smtpUser = mail.username;
+                        smtpFrom = mail.from_addr;
+                        smtpPass = '';
                 } catch (err) {
                         loadError = err instanceof Error ? err.message : String(err);
                 }
@@ -161,6 +191,42 @@
                                                 : String(err);
                 } finally {
                         pwBusy = false;
+                }
+        }
+
+        async function submitSmtp(e: SubmitEvent) {
+                e.preventDefault();
+                smtpError = '';
+                smtpMsg = '';
+                try {
+                        await saveSmtp({
+                                enabled: smtpEnabled,
+                                host: smtpHost.trim(),
+                                port: Number(smtpPort) || 587,
+                                username: smtpUser.trim(),
+                                password: smtpPass,
+                                from_addr: smtpFrom.trim()
+                        });
+                        smtpMsg = 'Mail delivery settings saved.';
+                        await reload();
+                } catch (err) {
+                        smtpError = err instanceof ApiError ? err.message : String(err);
+                }
+        }
+
+        async function sendSmtpTest() {
+                smtpTestMsg = '';
+                smtpError = '';
+                smtpTestBusy = true;
+                try {
+                        const res = await testSmtp();
+                        smtpTestMsg = res.ok
+                                ? `Test message sent to ${res.ok ? smtpFrom.trim() || 'the From address' : ''}. Check the inbox.`
+                                : `Send failed: ${res.error ?? 'unknown error'}`;
+                } catch (err) {
+                        smtpTestMsg = `Send failed: ${err instanceof ApiError ? err.message : String(err)}`;
+                } finally {
+                        smtpTestBusy = false;
                 }
         }
 
@@ -403,6 +469,57 @@
                                 <button class="btn-primary" type="button" onclick={beginMfaSetup} disabled={mfaBusy}>
                                         {mfaBusy ? 'Preparing…' : 'Enable MFA'}
                                 </button>
+                        {/if}
+                </section>
+
+                <section class="card" aria-labelledby="smtp-title">
+                        <h2 id="smtp-title">Email delivery (SMTP)</h2>
+                        {#if smtp === null}
+                                <p class="muted">loading…</p>
+                        {:else}
+                                <p class="muted">
+                                        Used for password-reset links. Point it at your own mailbox provider or relay;
+                                        the password is stored server-side and never shown again.
+                                </p>
+                                <form class="stack" onsubmit={submitSmtp}>
+                                        <label class="check-row">
+                                                <input type="checkbox" bind:checked={smtpEnabled} />
+                                                <span>Enable email delivery</span>
+                                        </label>
+                                        <div class="row">
+                                                <div class="field" style="flex:2">
+                                                        <label for="smtp-host">SMTP host</label>
+                                                        <input id="smtp-host" class="mono" type="text" placeholder="smtp.example.com" bind:value={smtpHost} />
+                                                </div>
+                                                <div class="field" style="flex:1">
+                                                        <label for="smtp-port">Port</label>
+                                                        <input id="smtp-port" class="mono" type="number" min="1" max="65535" bind:value={smtpPort} />
+                                                </div>
+                                        </div>
+                                        <div class="field">
+                                                <label for="smtp-user">SMTP username {#if smtp.password_set}<span class="muted"> · password saved</span>{/if}</label>
+                                                <input id="smtp-user" class="mono" type="text" autocomplete="off" bind:value={smtpUser} />
+                                        </div>
+                                        <div class="field">
+                                                <label for="smtp-pass">SMTP password {#if smtp.password_set}<span class="muted"> · leave blank to keep</span>{/if}</label>
+                                                <input id="smtp-pass" type="password" autocomplete="new-password" placeholder="{smtp.password_set ? '••••••••' : ''}" bind:value={smtpPass} />
+                                        </div>
+                                        <div class="field">
+                                                <label for="smtp-from">From address</label>
+                                                <input id="smtp-from" type="email" placeholder="drevanta@example.com" bind:value={smtpFrom} />
+                                        </div>
+                                        {#if smtpMsg}<p class="ok-line">{smtpMsg}</p>{/if}
+                                        {#if smtpTestMsg}<p class="muted">{smtpTestMsg}</p>{/if}
+                                        {#if smtpError}<p class="error" role="alert">{smtpError}</p>{/if}
+                                        <div class="row">
+                                                <button class="btn-primary" type="submit" disabled={smtpBusy}>
+                                                        {smtpBusy ? 'Saving…' : 'Save mail settings'}
+                                                </button>
+                                                <button class="btn-secondary" type="button" onclick={sendSmtpTest} disabled={smtpTestBusy}>
+                                                        {smtpTestBusy ? 'Sending…' : 'Send test message'}
+                                                </button>
+                                        </div>
+                                </form>
                         {/if}
                 </section>
 

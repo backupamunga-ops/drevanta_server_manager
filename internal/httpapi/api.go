@@ -11,6 +11,9 @@
 //	POST /api/v1/auth/login                — login (TOTP / recovery code when MFA on)
 //	POST /api/v1/auth/login/mfa            — two-step completion (mfa_challenge + code)
 //	POST /api/v1/auth/logout               — logout
+//	POST /api/v1/auth/recovery-login       — username + recovery code (no password) -> limited session
+//	POST /api/v1/auth/forgot               — email reset link request (generic response)
+//	POST /api/v1/auth/reset                — consume reset token, set new password
 //	GET  /api/v1/onboarding/status         — first-owner onboarding state
 //	POST /api/v1/onboarding/claim          — claim token + administrator creation
 //	POST /api/v1/onboarding/mfa/setup      — begin TOTP enrolment
@@ -23,7 +26,10 @@
 //	GET  /api/v1/account/mfa               — MFA posture for Account Security (full scope)
 //	GET  /api/v1/account/profile           — username + email (full scope)
 //	POST /api/v1/account/email             — set/clear the account email (full scope)
-//	POST /api/v1/account/password          — change password, ends other sessions (full scope)
+//	POST /api/v1/account/password          — change password, ends other sessions (full or recovery scope)
+//	GET  /api/v1/account/smtp              — mail delivery settings (full scope)
+//	POST /api/v1/account/smtp              — save mail delivery settings (full scope)
+//	POST /api/v1/account/smtp/test         — send a test message (full scope)
 //	POST /api/v1/account/mfa/setup         — begin TOTP enrolment later (full scope)
 //	POST /api/v1/account/mfa/verify        — enable MFA later, issue recovery codes (full scope)
 //	GET  /                                 — embedded SvelteKit dashboard
@@ -39,6 +45,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/auth"
@@ -66,6 +74,28 @@ type server struct {
 // anyway, so this is a memory-safety backstop, not a load feature).
 const argonConcurrency = 2
 
+// rateLimitFromEnv reads DREVANTA_RATE_LIMIT (requests per minute per
+// client bucket) with sane bounds; the default stays the shipped 10/min.
+// Operators behind heavy automation (or heavy traffic) can tune it
+// without a rebuild; 5 is the floor because below that the two-step
+// sign-in itself becomes unreliable.
+func rateLimitFromEnv() int {
+	v := os.Getenv("DREVANTA_RATE_LIMIT")
+	if v == "" {
+		return 10
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 5 {
+			return 5
+		}
+		if n > 600 {
+			return 600
+		}
+		return n
+	}
+	return 10
+}
+
 // New builds the full HTTP handler (no access view: the access
 // endpoints answer 503).
 func New(st *store.Store, version string, diskPaths []string) http.Handler {
@@ -80,7 +110,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 		st:         st,
 		version:    version,
 		collector:  metrics.NewCollector(diskPaths),
-		limiter:    auth.NewRateLimiter(10, time.Minute),
+		limiter:    auth.NewRateLimiter(rateLimitFromEnv(), time.Minute),
 		argonSlots: make(chan struct{}, argonConcurrency),
 		access:     access,
 		challenges: newMFAChallengeStore(),
@@ -97,6 +127,9 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	mux.Handle("POST /api/v1/auth/login", srv.guard(srv.handleLogin))
 	mux.Handle("POST /api/v1/auth/login/mfa", srv.guard(srv.handleLoginMFA))
 	mux.Handle("POST /api/v1/auth/logout", srv.guard(srv.handleLogout))
+	mux.Handle("POST /api/v1/auth/recovery-login", srv.guard(srv.handleRecoveryLogin))
+	mux.Handle("POST /api/v1/auth/forgot", srv.guard(srv.handleForgotPassword))
+	mux.Handle("POST /api/v1/auth/reset", srv.guard(srv.handlePasswordReset))
 	mux.HandleFunc("GET /api/v1/onboarding/status", srv.handleOnboardingStatus)
 	mux.Handle("POST /api/v1/onboarding/claim", srv.guard(srv.handleClaim))
 	mux.Handle("POST /api/v1/onboarding/mfa/setup", srv.guard(srv.requireSessionHandler(store.ScopeOnboarding, srv.handleMFASetup)))
@@ -111,8 +144,13 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 
 	// --- Account profile (email + password management) ---
 	mux.Handle("GET /api/v1/account/profile", srv.requireFullSession(srv.handleAccountProfile))
+	mux.Handle("GET /api/v1/account/smtp", srv.requireFullSession(srv.handleSMTPGet))
+	mux.Handle("POST /api/v1/account/smtp", srv.guard(srv.requireFullSession(srv.handleSMTPSet).ServeHTTP))
+	mux.Handle("POST /api/v1/account/smtp/test", srv.guard(srv.requireFullSession(srv.handleSMTPTest).ServeHTTP))
 	mux.Handle("POST /api/v1/account/email", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountEmailSet)))
-	mux.Handle("POST /api/v1/account/password", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountPassword)))
+	// The password endpoint accepts the limited recovery scope: recovery-code
+	// sign-ins must set a new password before anything else.
+	mux.Handle("POST /api/v1/account/password", srv.guard(srv.requireScopeIn(store.ScopeFull, store.ScopeRecovery)(srv.handleAccountPassword).ServeHTTP))
 
 	// --- Account Security (enable MFA later) ---
 	mux.Handle("GET /api/v1/account/mfa", srv.requireFullSession(srv.handleAccountMFAStatus))

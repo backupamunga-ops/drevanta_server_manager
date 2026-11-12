@@ -41,7 +41,7 @@ import (
 // the release workflow injects the pushed tag (v0.4.3 -> "0.4.3") and fails
 // closed if the built binary does not report it. This literal is only the
 // fallback for local, non-release builds.
-var version = "0.4.16"
+var version = "0.4.17"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
@@ -62,6 +62,8 @@ func main() {
 			os.Exit(cmdServe(os.Args[2:]))
 		case "claim":
 			os.Exit(cmdClaim(os.Args[2:], os.Stdout, os.Stderr))
+		case "admin":
+			os.Exit(cmdAdmin(os.Args[2:], os.Stdout, os.Stderr))
 		case "access":
 			os.Exit(cmdAccess(os.Args[2:], os.Stdout, os.Stderr))
 		case "https-serve":
@@ -108,6 +110,9 @@ flags:
   claim regenerate     re-issue the claim token (lost/expired link fallback)
   claim status         show onboarding state (no secrets)
   claim revoke         revoke the active claim token
+  admin reset-password break-glass password reset for the administrator
+                       (root; prompts twice unless --password is given,
+                       ends all sessions, is audited)
   access status|enable-https|disable-https|configure
                        public HTTPS access (root; see: drevanta access --help)
   https-serve          run the public HTTPS proxy worker (used by systemd)

@@ -108,6 +108,37 @@ ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (lower(email)) WHERE email != '';
 `,
 	},
+	{
+		version: 4,
+		name:    "smtp_and_password_resets",
+		up: `
+-- Singleton mail-delivery configuration (v0.4.17). The password is a
+-- stored secret: the DB file (drevanta:drevanta, 0640) is the boundary
+-- and the API never echoes it back, only reports password_set.
+CREATE TABLE IF NOT EXISTS smtp_config (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled    INTEGER NOT NULL DEFAULT 0,
+        host       TEXT NOT NULL DEFAULT '',
+        port       INTEGER NOT NULL DEFAULT 587,
+        username   TEXT NOT NULL DEFAULT '',
+        password   TEXT NOT NULL DEFAULT '',
+        from_addr  TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+);
+
+-- Single-use, expiring password-reset tokens. Only the SHA-256 hash is
+-- stored; a new request invalidates the previous unconsumed token.
+CREATE TABLE IF NOT EXISTS password_resets (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash  TEXT NOT NULL UNIQUE,
+        user_id     INTEGER NOT NULL REFERENCES users(id),
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        consumed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id);
+`,
+	},
 }
 
 // latestVersion is the highest applied-for schema version.

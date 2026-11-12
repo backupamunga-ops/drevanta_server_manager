@@ -4,6 +4,39 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.17] — three ways back in: recovery codes, email reset, break-glass CLI
+
+### Added
+- **Recovery-code sign-in (Path B).** "Use a recovery code instead" on
+  the sign-in screen: username + one single-use recovery code replaces
+  BOTH factors and issues a strictly limited session whose only power
+  is choosing a new password — after which the session upgrades to
+  full and the dashboard opens. The wrong-code error stays the constant
+  invalid-credentials message; the spent code cannot be replayed.
+- **Email password reset (Path A).** Settings gains an "Email delivery
+  (SMTP)" card (host, port, STARTTLS/implicit-TLS auto handling, auth,
+  From address, password stored server-side and never echoed back, plus
+  a test-send button that reports sender-side failures verbatim). With
+  delivery configured, "Forgot password?" mails a single-use, 30-minute
+  reset link (hashed at rest, previous token invalidated, max 3 requests
+  per account per hour). The response is generic whatever the
+  identifier, so nothing about the account can be probed. Completing a
+  reset ends every existing session. Delivered with a stdlib-only SMTP
+  client (implicit TLS on 465, STARTTLS enforced when offered and
+  required for public relays).
+- **Break-glass CLI (Path C).** `drevantad admin reset-password`
+  (root on the box) — prompts twice without echo or takes --password,
+  validates the 12-128 policy, ends all sessions, audits the reset.
+- **Nightly database backup.** The daemon snapshots its SQLite database
+  daily (`VACUUM INTO`, atomic) 20 seconds after start and then every
+  24 hours, keeping the last 7 under <data-dir>/backups.
+
+### Fixed
+- The login page's signed-in redirect no longer throws the recovery
+  session at the onboarding wizard, and a password-reset link opened
+  while the browser already sits on /login (same-document hash change)
+  now opens the reset screen via a hashchange listener.
+
 ## [0.4.16] — email as a login identifier + password management
 
 ### Added

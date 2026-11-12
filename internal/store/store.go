@@ -51,3 +51,13 @@ func (s *Store) Close() error {
 func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
+
+// BackupTo writes a consistent snapshot of the whole database to path
+// (SQLite VACUUM INTO — atomic, includes WAL content). The target file
+// must not exist yet.
+func (s *Store) BackupTo(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("backup to %s: %w", path, err)
+	}
+	return nil
+}

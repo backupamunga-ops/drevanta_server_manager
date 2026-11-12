@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/auth"
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/backup"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpapi"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpsd"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
@@ -47,6 +48,9 @@ func run(addr, dataDir string) error {
 
 	// Opportunistic hygiene: drop expired sessions at start-up.
 	_ = st.PruneSessions(ctx)
+
+	// Nightly consistent DB snapshots (VACUUM INTO), last 7 kept.
+	go backup.Loop(ctx, st, dataDir, 7)
 
 	diskPaths := dedupe([]string{"/", dataDir})
 	// The access view points the access-mode/domain endpoints at the

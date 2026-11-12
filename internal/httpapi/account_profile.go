@@ -115,8 +115,8 @@ func (s *server) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if req.CurrentPassword == "" || req.NewPassword == "" {
-		writeError(w, http.StatusBadRequest, "invalid_input", "current and new password required")
+	if req.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "invalid_input", "a new password is required")
 		return
 	}
 	if !validPassword(req.NewPassword) {
@@ -124,6 +124,10 @@ func (s *server) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 			"new password must be at least 12 characters (max 128)")
 		return
 	}
+
+	// Recovery-code sign-ins arrive with a limited session and NO usable
+	// current password; the single-use code already authenticated them.
+	recovery := sess.rec.Scope == store.ScopeRecovery
 
 	user, err := s.st.UserByID(r.Context(), sess.rec.UserID)
 	if err != nil {
@@ -139,11 +143,17 @@ func (s *server) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "busy", "too many concurrent operations")
 		return
 	}
-	if auth.VerifyPassword(req.CurrentPassword, user.PasswordHash) != nil {
-		audit(r.Context(), s.st, sess.username, "password_change_failed", "user",
-			map[string]any{"reason": "current_password_invalid"})
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect")
-		return
+	if !recovery {
+		if req.CurrentPassword == "" {
+			writeError(w, http.StatusBadRequest, "invalid_input", "current password required")
+			return
+		}
+		if auth.VerifyPassword(req.CurrentPassword, user.PasswordHash) != nil {
+			audit(r.Context(), s.st, sess.username, "password_change_failed", "user",
+				map[string]any{"reason": "current_password_invalid"})
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect")
+			return
+		}
 	}
 	newHash, err := auth.HashPassword(req.NewPassword)
 	if err != nil {
@@ -161,7 +171,17 @@ func (s *server) handleAccountPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "password saved, but other sessions could not be ended")
 		return
 	}
+	if recovery {
+		if err := s.st.SetSessionScope(r.Context(), auth.TokenHash(sess.raw), store.ScopeFull); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "password saved, but the session could not be upgraded")
+			return
+		}
+	}
+	via := "password_change"
+	if recovery {
+		via = "recovery_code"
+	}
 	audit(r.Context(), s.st, sess.username, "password_changed", "user",
-		map[string]any{"other_sessions_ended": ended})
+		map[string]any{"other_sessions_ended": ended, "via": via})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "other_sessions_ended": ended})
 }

@@ -29,6 +29,10 @@ const (
 const (
 	ScopeOnboarding = "onboarding"
 	ScopeFull       = "full"
+	// ScopeRecovery is the limited session issued by recovery-code
+	// sign-in (username + single-use recovery code, no password). It
+	// permits exactly one action: setting a new password.
+	ScopeRecovery = "recovery"
 )
 
 // ErrNotFound is returned when a queried row does not exist.
@@ -267,6 +271,36 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 		return u, fmt.Errorf("user %q: %w", username, err)
 	}
 	return u, nil
+}
+
+// SoleUser returns the only account, or an error when there are none
+// or several (used by the break-glass CLI where the operator has not
+// specified a username).
+func (s *Store) SoleUser(ctx context.Context) (User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+userCols+` FROM users ORDER BY id`)
+	if err != nil {
+		return User{}, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+	var users []User
+	for rows.Next() {
+		u, serr := scanUser(rows)
+		if serr != nil {
+			return User{}, serr
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return User{}, err
+	}
+	switch len(users) {
+	case 1:
+		return users[0], nil
+	case 0:
+		return User{}, ErrNotFound
+	default:
+		return User{}, fmt.Errorf("%d accounts exist", len(users))
+	}
 }
 
 // UserByIdentifier fetches one account by username OR by email

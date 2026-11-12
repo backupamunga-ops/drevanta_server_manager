@@ -251,6 +251,67 @@ export function changeAccountPassword(
         });
 }
 
+// --- Recovery paths (v0.4.17) ---
+
+export interface RecoveryLoginResult {
+        user: { username: string; mfa_enabled: boolean };
+        instance_status: InstanceStatus;
+        scope: string;
+        next: string;
+}
+
+export function recoveryLogin(identifier: string, code: string): Promise<RecoveryLoginResult> {
+        return postJSON<RecoveryLoginResult>('/api/v1/auth/recovery-login', {
+                username: identifier,
+                code
+        });
+}
+
+export interface ForgotResult {
+        ok: boolean;
+        message: string;
+}
+
+export function forgotPassword(identifier: string): Promise<ForgotResult> {
+        return postJSON<ForgotResult>('/api/v1/auth/forgot', { username: identifier });
+}
+
+export function resetPassword(token: string, newPassword: string): Promise<{ ok: boolean }> {
+        return postJSON<{ ok: boolean }>('/api/v1/auth/reset', { token, new_password: newPassword });
+}
+
+// --- Mail delivery (SMTP) settings ---
+
+export interface SmtpStatus {
+        enabled: boolean;
+        host: string;
+        port: number;
+        username: string;
+        from_addr: string;
+        password_set: boolean;
+}
+
+export function fetchSmtp(): Promise<SmtpStatus> {
+        return getJSON<SmtpStatus>('/api/v1/account/smtp');
+}
+
+export interface SmtpSaveInput {
+        enabled: boolean;
+        host: string;
+        port: number;
+        username: string;
+        password?: string; // empty = keep the stored one
+        from_addr: string;
+}
+
+export function saveSmtp(cfg: SmtpSaveInput): Promise<{ ok: boolean }> {
+        return postJSON<{ ok: boolean }>('/api/v1/account/smtp', cfg);
+}
+
+export function testSmtp(to?: string): Promise<{ ok: boolean; error?: string }> {
+        return postJSON<{ ok: boolean; error?: string }>('/api/v1/account/smtp/test', { to: to ?? '' });
+}
+
 export function accountMfaSetup(): Promise<MfaSetup> {
         return postJSON<MfaSetup>('/api/v1/account/mfa/setup', {});
 }
