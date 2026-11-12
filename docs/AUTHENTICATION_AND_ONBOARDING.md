@@ -1,13 +1,39 @@
 # Authentication & Onboarding — the complete user guide
 
 This manual walks through every screen of the Drevanta server console:
-first-time setup, multi-factor authentication, recovery codes, sign-in
-(desktop and mobile), the three ways to recover a locked account, and
-day-to-day account management. Every step shows the success state and
-the failure states you can meet along the way.
+first-time setup, multi-factor authentication, recovery codes, sign-in,
+the three ways back in when you are locked out, and day-to-day account
+management. Every step documents the success state **and** the failure
+states you can meet along the way.
 
-Screenshots were taken from v0.4.18. Desktop shots are 1440×900,
-mobile shots 390×844 (the console is fully responsive).
+**How to read the screenshots.** Every step shows one *pair of
+equal-sized images* — desktop on the left, mobile on the right — with a
+single shared caption underneath. Desktop shots are 1440×900, mobile
+shots 390×844; the console is fully responsive, and both views come
+from v0.4.18.
+
+---
+
+## The journey at a glance
+
+```mermaid
+flowchart TD
+    A["Install the server"] --> B["Claim link — one-time, 30 minutes"]
+    B --> C["Create the admin account"]
+    C --> D["Enable MFA — authenticator app"]
+    D --> E["Save the 10 recovery codes"]
+    E --> F{"Access address"}
+    F -- "Server IP" --> G["You're all set"]
+    F -- "Own domain" --> H["Add two DNS records"]
+    H --> I{"DNS verified?"}
+    I -- "Yes" --> G
+    I -- "Not yet" --> H
+    G --> J["Sign in — username or email + password"]
+    J --> K["Two-step verification code"]
+    K --> L["Dashboard"]
+    J -. "locked out?" .-> M["Path A: email reset · Path B: recovery code · Path C: CLI reset"]
+    M -.-> J
+```
 
 ---
 
@@ -30,19 +56,23 @@ mobile shots 390×844 (the console is fully responsive).
 
 ## 1. First-time setup — the claim link
 
-After installation the daemon prints a **one-time setup link**:
-`https://<your-server>/onboarding#token=drv1_…`. Open it in a browser.
-The link works exactly once, expires after 30 minutes, and only while
-no administrator exists.
+**What happens.** After installation the daemon prints a **one-time
+setup link**:
 
-![Claim screen](images/desk-12-onboarding-claim.png)
+```text
+https://<your-server>/onboarding#token=drv1_…
+```
 
-![Claim screen — mobile](images/mob-12-onboarding-claim.png)
+**What you do.** Open the link in a browser. It works exactly once,
+expires after 30 minutes, and is accepted only while no administrator
+exists. You can also enter a token manually: open `/onboarding` without
+the link and paste the `drv1_…` token.
 
-*Desktop — claim screen with the token detected from the pasted link.*
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Claim screen — desktop](images/desk-12-onboarding-claim.png) | ![Claim screen — mobile](images/mob-12-onboarding-claim.png) |
 
-You can also enter a token manually: open `/onboarding` without the
-link and paste the `drv1_…` token.
+*Claim screen with the token detected from the pasted link.*
 
 **Failure states**
 
@@ -52,146 +82,167 @@ link and paste the `drv1_…` token.
 | "token used" | somebody already finished setup | sign in instead |
 | "token invalid" | the token was rotated or mistyped | copy the whole link again |
 
-The token lives only in the browser tab until you submit — it is never
-stored in cookies, localStorage or logs.
+> [!IMPORTANT]
+> The token lives only in the browser tab until you submit — it is
+> never stored in cookies, localStorage or logs.
 
 ---
 
 ## 2. Create the admin account
 
-Pick a **username** (3–32 characters), an **email**, and a **password**
-(12–128 characters). The email is a second login identifier — you can
-sign in with the username *or* the email — and the target for
-password-reset links later. The strength meter reacts live; a Caps-Lock
-warning appears while typing.
+**What you do.** Pick a **username** (3–32 characters), an **email**,
+and a **password** (12–128 characters). The email is a second login
+identifier — you can sign in with the username *or* the email — and the
+target for password-reset links later. The strength meter reacts live;
+a Caps-Lock warning appears while typing.
 
-**Failure states**: too-short password ("Needs N more characters"),
-mismatched confirmation ("Passwords do not match yet."), a username
-with invalid characters, or a missing/invalid email. Nothing is sent
-to the server until every field passes — the first invalid field is
+**Failure states.** A too-short password ("Needs N more characters"),
+a mismatched confirmation ("Passwords do not match yet."), a username
+with invalid characters, or a missing/invalid email. Nothing is sent to
+the server until every field passes — the first invalid field is
 focused for you.
 
 ---
 
 ## 3. Enable multi-factor authentication
 
-The console asks for an authenticator app (Aegis, 1Password, Google
-Authenticator, …). Scan the QR code — or reveal the setup key and enter
-it manually:
+**What happens.** The console asks for an authenticator app (Aegis,
+1Password, Google Authenticator, …) and shows a QR code to scan. If you
+cannot scan, the setup key can be entered by hand — it is collapsed by
+default so it does not shoulder-surf:
 
-![MFA enrolment](images/desk-13-onboarding-mfa-collapsed.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![MFA enrolment — desktop](images/desk-13-onboarding-mfa-collapsed.png) | ![MFA enrolment — mobile](images/mob-13-onboarding-mfa-collapsed.png) |
 
-![MFA enrolment — mobile](images/mob-13-onboarding-mfa-collapsed.png)
+*The setup key is collapsed by default; "Reveal" shows the whole field, and "How does this work?" opens step-by-step instructions below the QR code.*
 
-*The setup key is collapsed by default. "Reveal" shows the whole field;*
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Setup key revealed — desktop](images/desk-14-onboarding-mfa-revealed.png) | ![Setup key revealed — mobile](images/mob-14-onboarding-mfa-revealed.png) |
 
-![Secret revealed](images/desk-14-onboarding-mfa-revealed.png)
+*The revealed setup key; "Hide" collapses it again.*
 
-![Secret revealed — mobile](images/mob-14-onboarding-mfa-revealed.png)
+**What you do.** Enter the current 6-digit code and confirm.
 
-*"Hide" collapses it again. "How does this work?" opens step-by-step
-instructions below the QR code.*
-
-Enter the current 6-digit code and confirm.
-
-**Failure state**: "invalid authenticator code" — usually a code that
+**Failure state.** "invalid authenticator code" — usually a code that
 just rolled over, or device/server clock drift. Wait for the next code
 and try again; check NTP on the server if it keeps failing.
 
 MFA can be skipped ("Skip for now") with an explicit risk
-acknowledgement — the account then protects by password only, and MFA
-can be enabled later under Settings → Account security.
+acknowledgement:
+
+> [!WARNING]
+> Skipping leaves the account protected by password only. MFA can be
+> enabled later under Settings → Account security.
 
 ---
 
 ## 4. Save the recovery codes
 
-After verification the console shows **10 single-use recovery codes**.
-They are shown exactly once; you must confirm they are stored before
-continuing. Each code signs you in once when the normal path fails
-(see [section 9](#9-locked-out-three-ways-back-in)). Regenerating the
-set later invalidates all previous codes.
+**What happens.** After verification the console shows **10 single-use
+recovery codes**. They are displayed exactly once, and you must confirm
+they are stored before continuing. Each code signs you in once when the
+normal path fails (see [section 9](#9-locked-out-three-ways-back-in)).
+Regenerating the set later invalidates all previous codes.
 
-![Recovery codes](images/desk-15-onboarding-recovery-codes.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Recovery codes — desktop](images/desk-15-onboarding-recovery-codes.png) | ![Recovery codes — mobile](images/mob-15-onboarding-recovery-codes.png) |
 
-![Recovery codes — mobile](images/mob-15-onboarding-recovery-codes.png)
+*The ten recovery codes, shown exactly once, with the storage confirmation.*
 
-*Store them offline — a password manager or printed paper, not a
-screenshot in the same cloud as the server.*
+> [!TIP]
+> Store the codes offline — a password manager or printed paper, not a
+> screenshot in the same cloud as the server.
 
 ---
 
 ## 5. Choose the address — server IP or your domain
 
-The console is reachable over the server IP with a publicly trusted
-certificate, or under your own domain. "I have a domain" → "Set up
-your domain" asks for the hostname, shows the exact DNS records to
-create, and verifies before switching anything:
+**What happens.** The console is reachable over the server IP with a
+publicly trusted certificate, or under your own domain. Choosing
+"I have a domain" → "Set up your domain" asks for the hostname, shows
+the exact DNS records to create, and verifies before switching
+anything:
 
-![Address choice](images/desk-16-onboarding-address.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Address choice — desktop](images/desk-16-onboarding-address.png) | ![Address choice — mobile](images/mob-16-onboarding-address.png) |
 
-![Address choice — mobile](images/mob-16-onboarding-address.png)
+*The address step with the two DNS records to create.*
 
-**Failure state** — "Domain not connected yet": the DNS records were
+**Failure state — "Domain not connected yet".** The DNS records were
 not found or do not point at this server yet. The panel shows both
 records with Copy buttons; DNS changes can take minutes to hours. The
 server-IP address keeps working the whole time, and you can skip:
 
-![Domain failure](images/desk-17-onboarding-domain-failure.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Domain failure — desktop](images/desk-17-onboarding-domain-failure.png) | ![Domain failure — mobile](images/mob-17-onboarding-domain-failure.png) |
 
-![Domain failure — mobile](images/mob-17-onboarding-domain-failure.png)
+*"Domain not connected yet" — verification failed, the IP address is untouched.*
 
-The certificate is issued only after DNS verifies, and any failure
-leaves the IP address untouched (fail-safe by design).
+> [!NOTE]
+> The certificate is issued only after DNS verifies, and any failure
+> leaves the IP address untouched — fail-safe by design.
 
 ---
 
 ## 6. You're all set — the completion checklist
 
-The final screen summarises what was configured (admin credentials, MFA,
-account secured, address/domain) with live CPU, memory and disk
-readings, and links back to the domain configuration if you skipped it:
+**What happens.** The final screen summarises what was configured —
+admin credentials, MFA, account secured, address/domain — with live
+CPU, memory and disk readings, and links back to the domain
+configuration if you skipped it:
 
-![Completion checklist](images/desk-18-onboarding-done-checklist.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Completion checklist — desktop](images/desk-18-onboarding-done-checklist.png) | ![Completion checklist — mobile](images/mob-18-onboarding-done-checklist.png) |
 
-![Completion checklist — mobile](images/mob-18-onboarding-done-checklist.png)
+*The completion checklist with live server readings.*
 
-"Proceed to dashboard" signs you in. A paused onboarding (browser
-closed mid-way) resumes where you left off when you sign in again.
+**What you do.** "Proceed to dashboard" signs you in. A paused
+onboarding (browser closed mid-way) resumes where you left off when
+you sign in again.
 
 ---
 
 ## 7. Signing in — two steps
 
-Sign-in works with **username or email** plus password:
+**Step 1 — credentials.** Sign-in works with **username or email** plus
+password. The password field has a Show/Hide toggle and is masked by
+default:
 
-![Sign-in step 1](images/desk-01-login-step1.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Sign-in step 1 — desktop](images/desk-01-login-step1.png) | ![Sign-in step 1 — mobile](images/mob-01-login-step1.png) |
 
-![Sign-in step 1 — mobile](images/mob-01-login-step1.png)
+*Step 1 — username/email and password, masked by default.*
 
-*The password field has a Show/Hide toggle; masked by default.*
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Password revealed — desktop](images/desk-02-login-password-revealed.png) | ![Password revealed — mobile](images/mob-02-login-password-revealed.png) |
 
-![Password revealed](images/desk-02-login-password-revealed.png)
+*The same field with "Show" pressed — handy on a keyboardless tablet.*
 
-![Password revealed — mobile](images/mob-02-login-password-revealed.png)
+**Step 2 — the code.** When MFA is enabled the console switches to its
+own **Two-step verification** screen — the code field only,
+autofocused:
 
-When MFA is enabled the console switches to its own **Two-step
-verification** screen — the code field only, autofocused:
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Two-step verification — desktop](images/desk-04-login-mfa-screen.png) | ![Two-step verification — mobile](images/mob-04-login-mfa-screen.png) |
 
-![Two-step verification](images/desk-04-login-mfa-screen.png)
+*Step 2 — the dedicated two-step screen, nothing else on it.*
 
-![Mobile two-step verification](images/mob-04-login-mfa-screen.png)
+The screen survives a full page reload:
 
-![Desktop — the two-step screen survives a reload](images/desk-05-login-mfa-after-reload.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Two-step screen after reload — desktop](images/desk-05-login-mfa-after-reload.png) | ![Two-step screen after reload — mobile](images/mob-05-login-mfa-after-reload.png) |
 
-![Two-step screen after reload — mobile](images/mob-05-login-mfa-after-reload.png)
-
-*Desktop — after a full page reload the console is still on the code
-step; the password is never asked again.*
-
-*Mobile — switching to your authenticator app and back is safe: the
-screen survives the page reload that phones often trigger, so you never
-re-enter the password.*
+*After a reload the console is still on the code step — the password is never asked again. On a phone, switching to your authenticator app and back is safe: the reload phones often trigger does not lose your place.*
 
 The code field accepts the 6-digit code **or** one of the recovery
 codes. After the code verifies, the dashboard opens.
@@ -208,15 +259,17 @@ codes. After the code verifies, the dashboard opens.
 | "too many failed attempts for this account — wait a few minutes" | 10 failed attempts against the account in 15 minutes (from any address) | wait 5 minutes; then recovery paths below |
 | "this sign-in attempt expired" | the two-step challenge sat for 5 minutes unused | sign in again |
 
-![Wrong password](images/desk-03-login-wrong-password.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Wrong password — desktop](images/desk-03-login-wrong-password.png) | ![Wrong password — mobile](images/mob-03-login-wrong-password.png) |
 
+*A wrong password keeps you on step 1 — the error is constant, with no hint which field was wrong.*
 
-![Wrong password — mobile](images/mob-03-login-wrong-password.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Wrong code — desktop](images/desk-06-login-mfa-wrong-code.png) | ![Wrong code — mobile](images/mob-06-login-mfa-wrong-code.png) |
 
-![Wrong code](images/desk-06-login-mfa-wrong-code.png)
-
-
-![Wrong code — mobile](images/mob-06-login-mfa-wrong-code.png)
+*A wrong code keeps you on the two-step screen — just wait for the next one.*
 
 ---
 
@@ -229,9 +282,11 @@ one of your saved codes. The code replaces both factors for this one
 sign-in and lands on a forced "Set a new password" screen — after
 saving, you are on the dashboard with a fresh password.
 
-![Recovery-code sign-in](images/desk-07-login-recovery-code.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Recovery-code sign-in — desktop](images/desk-07-login-recovery-code.png) | ![Recovery-code sign-in — mobile](images/mob-07-login-recovery-code.png) |
 
-![Recovery-code sign-in — mobile](images/mob-07-login-recovery-code.png)
+*Path B — the recovery-code field in place of the password.*
 
 ### Path A — email reset link (needs SMTP configured)
 
@@ -239,23 +294,27 @@ saving, you are on the dashboard with a fresh password.
 an email and mail delivery is configured (Settings → Email delivery),
 a **single-use link** valid for 30 minutes is sent:
 
-![Forgot password](images/desk-08-login-forgot.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Forgot password — desktop](images/desk-08-login-forgot.png) | ![Forgot password — mobile](images/mob-08-login-forgot.png) |
 
-![Forgot password — mobile](images/mob-08-login-forgot.png)
+*Path A — the reset request form.*
 
 The response is the same whatever you type — nobody can probe whether
 an account exists. Opening the link shows the reset screen; completing
 it signs out every existing session.
 
-![Reset screen](images/desk-09-login-reset-link.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Reset screen — desktop](images/desk-09-login-reset-link.png) | ![Reset screen — mobile](images/mob-09-login-reset-link.png) |
 
-![Reset screen — mobile](images/mob-09-login-reset-link.png)
+*The reset screen reached from the emailed link.*
 
 ### Path C — break-glass CLI (root on the server)
 
 If email is down and the codes are lost, root access always wins:
 
-```
+```text
 sudo drevantad admin reset-password            # prompts twice, input hidden
 sudo drevantad admin reset-password --username admin --password '…'
 ```
@@ -265,21 +324,24 @@ audit event.
 
 ### Last resort
 
-Lost password, codes, email **and** SSH access cannot be recovered by
-design — reinstall and re-claim (`sudo drevanta claim regenerate`
-works only before the first owner exists). This is the trade-off of a
-self-hosted, single-admin console.
+> [!WARNING]
+> Lost password, codes, email **and** SSH access cannot be recovered by
+> design — reinstall and re-claim (`sudo drevanta claim regenerate`
+> works only before the first owner exists). This is the trade-off of a
+> self-hosted, single-admin console.
 
 ---
 
 ## 10. Managing the account — Settings
 
-![Settings — account, mail delivery, security](images/desk-11-settings-account-smtp.png)
+Settings holds four groups: **Account** (email + password), **Email
+delivery** (SMTP), **Account security**, and **Access address**.
 
-![Settings — mobile](images/mob-11-settings-account-smtp.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Settings — desktop](images/desk-11-settings-account-smtp.png) | ![Settings — mobile](images/mob-11-settings-account-smtp.png) |
 
-*Settings: Account (email + password), Email delivery (SMTP), Account
-security, Access address.*
+*Settings — account, mail delivery, security and access address.*
 
 - **Email** — change or clear it; sign-in falls back to username-only
   when cleared. Uniqueness is enforced case-insensitively.
@@ -294,9 +356,13 @@ security, Access address.*
 - **Access address** — add/remove the custom domain; warns when the
   certificate has ≤ 14 days left.
 
-![Dashboard](images/desk-10-dashboard.png)
+The dashboard you land on after sign-in:
 
-![Mobile dashboard](images/mob-10-dashboard.png)
+| Desktop | Mobile |
+|:---:|:---:|
+| ![Dashboard — desktop](images/desk-10-dashboard.png) | ![Dashboard — mobile](images/mob-10-dashboard.png) |
+
+*The dashboard with live server readings.*
 
 ---
 
@@ -370,5 +436,6 @@ security, Access address.*
 
 ---
 
-*Manual generated for Drevanta v0.4.18. Screenshots live in
-`docs/images/` — desktop (`desk-…`) and mobile (`mob-…`).*
+*Manual for Drevanta v0.4.18. Screenshots live in `docs/images/` — in
+every pair the desktop shot (`desk-…`) is on the left, the mobile shot
+(`mob-…`) on the right.*
