@@ -5,8 +5,61 @@ This document describes what is actually implemented after Sprint 2
 is preserved unchanged where it applied (daemon core, metrics, audit,
 systemd hardening); this document adds identity, onboarding, the
 installer, and the release/rollback machinery.
+Section 1 records Sprint 1 itself.
 
-## 1. Overview
+## 1. Sprint 1 — the walking skeleton (as built)
+
+Sprint 1 (release `0.1.0-sprint1`, 2026-11-10) laid the foundation
+everything above builds on. Its goal in one line: *the daemon exists,
+is deployed, and is observable*.
+
+**Delivered**
+
+- **Daemon core** (`cmd/drevantad/`, `internal/httpapi/`) — frozen API
+  surface (`GET /healthz`, `GET /readyz`,
+  `GET /api/v1/server/metrics`), loopback-only binding
+  (`127.0.0.1:8080`), graceful shutdown, JSON logs to stderr.
+- **On-demand metrics** (`internal/metrics/`) — every request performs
+  one `/proc` + `statfs(2)` pass; no background sampling loops; parsers
+  unit-tested against fixtures, never against host state.
+- **SQLite store** (`internal/store/`) — `modernc.org/sqlite` (pure Go,
+  no CGO), WAL mode, transactional idempotent migrations
+  (`schema_migrations`), and the append-only `audit_events` lifecycle
+  log (migration v1).
+- **Embedded dashboard** (`web/`) — SvelteKit 2 / Svelte 5 static
+  export, TypeScript, no CDN assets: live CPU sparkline, memory/disk
+  bars, uptime, healthz/readyz pills, 5 s polling with pause; embedded
+  into the binary with `go:embed`.
+- **Hardened systemd unit** (`deploy/drevanta.service`) — unprivileged
+  `drevanta` user, `ProtectSystem=strict`, empty capability set,
+  `MemoryMax=256M`, restart-on-failure; the full posture (including the
+  later sandbox additions) is tabulated in §6.
+- **CI** (`ci.yml`) — gofmt/vet/test + `linux/amd64` cross-build;
+  `svelte-check` + static dashboard build. No deploy job by design.
+- **Runbook and evidence** — manual deployment runbook
+  (`deploy/DEPLOY.md`), as-built architecture notes (this file), and a
+  memory benchmark of the deployed daemon on the development VPS
+  (`docs/BENCHMARKS.md`).
+
+**Security posture carried from day one**
+
+- No public ports: the daemon binds `127.0.0.1:8080` only; operators
+  reach it through an SSH tunnel.
+- No secrets in the repository; CI receives no host credentials.
+- Strict `/api/*` namespace — unknown API paths answer 404 JSON, no
+  SPA leak.
+
+**What later sprints changed on top of the skeleton** — metrics is no
+longer anonymous (a full-scope session is required since Sprint 2); the
+daemon gained subcommands (`serve`, `claim`, `version` — the Sprint 1
+bare-flag invocation still works); the flat binary layout became
+`releases/<version>/` with a `current` symlink (legacy flat installs
+are preserved automatically as `0.1.0-legacy`); identity, onboarding
+and public HTTPS were added around the same frozen core.
+
+---
+
+## 2. Overview
 
 Drevanta is a single Go binary (`drevantad`) that:
 
@@ -43,12 +96,12 @@ Design invariants:
 - **No external runtime deps:** pure-Go SQLite (`modernc.org/sqlite`,
   no CGO), stdlib HTTP, static binary. No Docker, no Nginx, no agents.
 
-## 2. Components
+## 3. Components
 
 | Component            | Location                | Notes                                                             |
 | -------------------- | ----------------------- | ----------------------------------------------------------------- |
 | Daemon entry point   | `cmd/drevantad/`        | Subcommands `serve` (default) / `claim init\|status\|revoke` / `version`; signal handling, graceful shutdown. |
-| HTTP API             | `internal/httpapi/`     | API surface (§3), session middleware, origin guard, panic recovery, error-focused logging. |
+| HTTP API             | `internal/httpapi/`     | API surface (§4), session middleware, origin guard, panic recovery, error-focused logging. |
 | Auth primitives      | `internal/auth/`        | argon2id, tokens, RFC 6238 TOTP, recovery codes, rate limiter — pure stdlib + `golang.org/x/crypto`. |
 | Metrics collectors   | `internal/metrics/`     | `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, `statfs(2)`; pure stdlib; unit-tested against fixtures. |
 | Store                | `internal/store/`       | modernc.org/sqlite; migrations v1–v2; identity + audit queries; single connection. |
@@ -62,9 +115,9 @@ the embed package lives beside `web/build`; `npm run build` output is
 embedded directly with no copy step. A committed `.gitkeep` keeps
 `go build` working before the first dashboard build.
 
-## 3. API contract
+## 4. API contract
 
-### 3.1 Unauthenticated (by design)
+### 4.1 Unauthenticated (by design)
 
 | Endpoint   | Method | Success                            | Failure                      |
 | ---------- | ------ | ---------------------------------- | ---------------------------- |
@@ -75,7 +128,7 @@ embedded directly with no copy step. A committed `.gitkeep` keeps
 `/healthz` and `/readyz` stay open for systemd/monitoring and reveal
 nothing. The dashboard shell (HTML/JS) is static content.
 
-### 3.2 Identity and onboarding (Sprint 2)
+### 4.2 Identity and onboarding (Sprint 2)
 
 | Endpoint                       | Method | Auth             | Notes                                             |
 | ------------------------------ | ------ | ---------------- | ------------------------------------------------- |
@@ -104,7 +157,7 @@ nothing. The dashboard shell (HTML/JS) is static content.
 - Unauthenticated endpoints (`login`, `claim`, `mfa/verify`) are rate
   limited to 10 attempts/min per source address (429 + `Retry-After`).
 
-### 3.3 Metrics snapshot shape (unchanged)
+### 4.3 Metrics snapshot shape (unchanged)
 
 ```json
 {
@@ -122,25 +175,7 @@ previous request (jiffy delta from `/proc/stat`); the first request takes
 two samples 250 ms apart. `used = total − available` for memory, matching
 kernel reclaimable-pressure semantics.
 
-Metrics snapshot shape:
-
-```json
-{
-  "timestamp": "RFC3339 UTC",
-  "cpu":        { "cores": 4, "usage_percent": 0.0, "load_1m": 0.1, "load_5m": 0.05, "load_15m": 0.02 },
-  "memory":     { "total_bytes": 0, "available_bytes": 0, "used_bytes": 0, "used_percent": 0.0,
-                  "buffers_bytes": 0, "cached_bytes": 0, "swap_total_bytes": 0, "swap_used_bytes": 0 },
-  "disk":       [ { "path": "/", "total_bytes": 0, "used_bytes": 0, "available_bytes": 0, "used_percent": 0.0 } ],
-  "uptime_seconds": 0.0
-}
-```
-
-CPU `usage_percent` is the busy fraction between the current and the
-previous request (jiffy delta from `/proc/stat`); the first request takes
-two samples 250 ms apart. `used = total − available` for memory, matching
-kernel reclaimable-pressure semantics.
-
-## 4. Storage, identity, and audit
+## 5. Storage, identity, and audit
 
 - File: `/var/lib/drevanta/drevanta.db`, WAL mode, `busy_timeout=10s`,
   `foreign_keys=on`, single connection per process.
@@ -164,7 +199,7 @@ kernel reclaimable-pressure semantics.
   not audited (5 s polling would flood the log without adding
   accountability).
 
-### 4.1 Identity model
+### 5.1 Identity model
 
 - **First-owner claim** — the installer (or an operator via
   `drevantad claim init`) issues a 256-bit CSPRNG token (`drv1_…`) that
@@ -199,7 +234,7 @@ kernel reclaimable-pressure semantics.
   always issued when MFA is enabled). Enrolled accounts are unaffected:
   their login still requires TOTP or a recovery code.
 
-## 5. Service hardening (systemd)
+## 6. Service hardening (systemd)
 
 `deploy/drevanta.service`:
 
@@ -217,9 +252,9 @@ Rationale for the memory ceiling: the 512 MB-class VPS budget leaves
 headroom for the OS plus future components; see `docs/BENCHMARKS.md` for
 measured consumption (an order of magnitude below the ceiling).
 
-## 6. Installer, release layout, rollback
+## 7. Installer, release layout, rollback
 
-### 6.1 Installer (`deploy/install.sh`)
+### 7.1 Installer (`deploy/install.sh`)
 
 One command, verified and idempotent:
 
@@ -246,7 +281,7 @@ One command, verified and idempotent:
   (optionally also to `--token-file`, mode 0600). A claimed instance is
   never re-issued a token.
 
-### 6.2 Rollback machinery
+### 7.2 Rollback machinery
 
 - `rollback.sh [release]` — flips `current` to the named (or previous)
   release, restarts, verifies `/readyz`, prints a machine-readable
@@ -263,7 +298,7 @@ One command, verified and idempotent:
 - **Automatic deployment on push remains disabled** (engineering order);
   CI builds/tests only and never receives host credentials.
 
-## 7. Testing
+## 8. Testing
 
 - Unit tests for every `/proc` parser against fixtures (no dependence on
   host state).
@@ -274,7 +309,7 @@ One command, verified and idempotent:
 - CI (`ci.yml`): gofmt, `go vet`, `go test`, `linux/amd64` cross-build;
   `svelte-check` + static dashboard build.
 
-## 8. Deliberately absent after Sprint 2
+## 9. Deliberately absent after Sprint 2
 
 - TLS / public exposure (stays loopback + SSH tunnel).
 - Multiple administrators, password change/reset flows, MFA re-enrolment
