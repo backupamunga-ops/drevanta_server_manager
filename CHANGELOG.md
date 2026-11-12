@@ -4,6 +4,36 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.18] — security hardening pack
+
+### Added
+- **Security headers on every response, both access modes** (proxy and
+  SSH tunnel): Content-Security-Policy (self-pinned with the SvelteKit
+  boot inline script allowed), `X-Frame-Options: DENY`,
+  Referrer-Policy: no-referrer, Permissions-Policy (camera/mic/
+  geolocation/payment off), X-Content-Type-Options: nosniff; HSTS on
+  HTTPS responses only.
+- **Per-account failure lockout.** 10 failed attempts against one
+  account within 15 minutes (password, code or recovery code) locks the
+  account for 5 minutes regardless of source address — an attacker
+  spreading guesses across IPs gets nothing; an operator with fat
+  fingers is never close to the threshold. Successful sign-in resets
+  the counter; every lockout is audited (`account_locked`).
+- **TOTP replay hardening (older-step rejection).** A code from an
+  OLDER step than the last accepted one is rejected — a phished code
+  cannot be replayed later. Same-window reuse stays allowed on purpose
+  (quick re-login; see the design note in internal/auth/totp.go). The
+  accepted step is recorded for both login paths.
+- **Sign out everywhere** (Settings → Account) ends every session
+  including the current one and is audited.
+- **Certificate-expiry visibility.** The console shows a warning when
+  the serving certificate has ≤ 14 days left (renewal is automatic; the
+  warning names the fallback command if it ever fails).
+- **CI advisory scans**: govulncheck (Go) and npm audit (non-dev deps)
+  run on every push as non-blocking annotations.
+- The per-minute auth rate limit is tunable via `DREVANTA_RATE_LIMIT`
+  (5–600, default unchanged at 10).
+
 ## [0.4.17] — three ways back in: recovery codes, email reset, break-glass CLI
 
 ### Added

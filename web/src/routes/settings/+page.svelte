@@ -12,6 +12,7 @@
                 fetchAccountProfile,
                 fetchSession,
                 fetchSmtp,
+                signOutEverywhere,
                 removeDomain,
                 saveSmtp,
                 setAccountEmail,
@@ -60,6 +61,18 @@
         let smtpTestBusy = $state(false);
         let smtpTestMsg = $state('');
 
+        // Sign out everywhere.
+        let soBusy = $state(false);
+        async function doSignOutEverywhere() {
+                soBusy = true;
+                try {
+                        await signOutEverywhere();
+                        await goto('/login', { replaceState: true });
+                } finally {
+                        soBusy = false;
+                }
+        }
+
         // Account Security: enable-MFA flow (same shape as onboarding).
         let mfaStage = $state<'idle' | 'setup' | 'verify' | 'codes'>('idle');
         let mfaSecret = $state('');
@@ -96,6 +109,16 @@
                 if (pwNew !== '' && pwNew.length < 12) return 'Use at least 12 characters.';
                 if (pwConfirm !== '' && pwConfirm !== pwNew) return 'Passwords do not match yet.';
                 return '';
+        });
+
+        // Certificate expiry visibility: surface the renewal window instead
+        // of letting a silent failure surprise the operator.
+        const certDaysLeft = $derived.by(() => {
+                const na = access?.https?.not_after;
+                if (!na) return null;
+                const ms = new Date(na).getTime() - Date.now();
+                if (Number.isNaN(ms)) return null;
+                return Math.floor(ms / 86_400_000);
         });
 
         $effect(() => {
@@ -405,6 +428,9 @@
                                                 >
                                                         {pwBusy ? 'Changing…' : 'Change password'}
                                                 </button>
+                                                <button class="btn-secondary" type="button" onclick={doSignOutEverywhere} disabled={soBusy}>
+                                                        {soBusy ? 'Signing out…' : 'Sign out everywhere'}
+                                                </button>
                                         </div>
                                 </form>
                         {/if}
@@ -538,6 +564,13 @@
                                         {/if}
                                 </p>
 
+                                {#if certDaysLeft !== null && access?.https?.cert_valid && certDaysLeft <= 14}
+                                        <p class="warn-line">
+                                                <span class="pill pill-warn">certificate</span>
+                                                expires in {certDaysLeft} day{certDaysLeft === 1 ? '' : 's'} — renewal is automatic; if it
+                                                fails, see <code>sudo drevanta access status</code> on the server.
+                                        </p>
+                                {/if}
                                 {#if currentDomain}
                                         <p class="ok-line">
                                                 <span class="pill pill-ok">custom domain</span>

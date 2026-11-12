@@ -97,7 +97,7 @@ func TestLoginMFAChallengeFlow(t *testing.T) {
 
 	// The right code completes the sign-in and issues a session.
 	rec = do(t, h, http.MethodPost, "/api/v1/auth/login/mfa",
-		fmt.Sprintf(`{"challenge":%q,"code":%q}`, challenge, currentTOTP(t, secret)), nil)
+		fmt.Sprintf(`{"challenge":%q,"code":%q}`, challenge, nextTOTP(t, secret)), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("mfa login = %d: %s", rec.Code, rec.Body.String())
 	}

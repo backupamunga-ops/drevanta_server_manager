@@ -137,13 +137,22 @@ func (p *Proxy) HTTPSHandler() (http.Handler, error) {
 	return securityHeaders(applyDeadline(rp)), nil
 }
 
-// securityHeaders adds the HTTPS-only response headers.
+// securityHeaders adds the HTTPS-only response headers. Everything is
+// also set by the daemon itself (httpapi) for tunnel mode; the proxy
+// repeats them so HTTPS responses are covered even where the backend
+// headers are rewritten.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; "+
+				"base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 		h.Set("Strict-Transport-Security", "max-age=31536000")
 		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		next.ServeHTTP(w, r)
 	})
 }

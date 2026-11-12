@@ -133,6 +133,29 @@ func (s *server) requireFullSession(next http.HandlerFunc) http.Handler {
 	return s.requireSession(store.ScopeFull, next)
 }
 
+// securityHeaders pins the browser-facing hardening headers on every
+// response, in both access modes (public HTTPS proxy and SSH tunnel).
+// CSP allows the SvelteKit boot inline script (no nonces available in a
+// static-adapter app) but pins everything else to 'self', forbids
+// framing and plugin objects, and locks down base-uri/form-action.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; "+
+				"base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+		if requestIsHTTPS(r) {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		h.Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // clientKey identifies the rate-limit bucket for a request.
 //
 // Behind the public HTTPS proxy every request arrives from 127.0.0.1, so

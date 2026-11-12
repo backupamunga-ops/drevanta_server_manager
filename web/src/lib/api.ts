@@ -312,6 +312,10 @@ export function testSmtp(to?: string): Promise<{ ok: boolean; error?: string }> 
         return postJSON<{ ok: boolean; error?: string }>('/api/v1/account/smtp/test', { to: to ?? '' });
 }
 
+export function signOutEverywhere(): Promise<{ ok: boolean; ended: number }> {
+        return postJSON<{ ok: boolean; ended: number }>('/api/v1/account/sessions/out', {});
+}
+
 export function accountMfaSetup(): Promise<MfaSetup> {
         return postJSON<MfaSetup>('/api/v1/account/mfa/setup', {});
 }

@@ -180,6 +180,14 @@ func (s *server) handleLoginMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "account unavailable")
 		return
 	}
+	failKey := "login:" + user.Username
+	if s.fails.Locked(failKey) {
+		s.challenges.drop(token)
+		audit(r.Context(), s.st, user.Username, "login_failed", "auth", map[string]any{"reason": "account_locked"})
+		writeError(w, http.StatusTooManyRequests, "account_locked", "too many failed attempts for this account \u2014 wait a few minutes")
+		return
+	}
+
 	state, err := s.st.InstanceState(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "state unavailable")
@@ -189,9 +197,17 @@ func (s *server) handleLoginMFA(w http.ResponseWriter, r *http.Request) {
 	// Same second-factor rules as the combined login: a 6-digit value is
 	// a TOTP code, anything else a single-use recovery code.
 	if sixDigitRE.MatchString(code) {
-		_, ok, err := auth.VerifyTOTP(user.MFASecret, code, time.Now())
+		step, ok, err := auth.VerifyTOTP(user.MFASecret, code, time.Now())
 		if err != nil || !ok {
 			s.failMFAAttempt(w, r, token, user.Username, "totp_invalid", "invalid authenticator code")
+			return
+		}
+		if step < user.MFALastStep {
+			s.failMFAAttempt(w, r, token, user.Username, "totp_invalid", "invalid authenticator code")
+			return
+		}
+		if err := s.st.AcceptMFAStep(r.Context(), user.ID, step); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "could not record the code step")
 			return
 		}
 	} else {
@@ -216,6 +232,7 @@ func (s *server) handleLoginMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not start session")
 		return
 	}
+	s.fails.Reset(failKey)
 	audit(r.Context(), s.st, user.Username, "login_success", "auth",
 		map[string]any{"scope": scope, "via": "mfa_challenge"})
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -123,7 +123,7 @@ func TestMFAEnrolledUsersKeepProtection(t *testing.T) {
 		t.Fatalf("enrolled password-only login = %d %s, want totp_required", rec.Code, rec.Body.String())
 	}
 	rec = do(t, h, http.MethodPost, "/api/v1/auth/login",
-		fmt.Sprintf(`{"username":"admin","password":"correct horse battery","totp":%q}`, currentTOTP(t, secret)), nil)
+		fmt.Sprintf(`{"username":"admin","password":"correct horse battery","totp":%q}`, nextTOTP(t, secret)), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("enrolled TOTP login = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -194,7 +194,7 @@ func TestAccountMFAEnableLater(t *testing.T) {
 		t.Fatalf("post-enable password-only login = %d %s", rec.Code, rec.Body.String())
 	}
 	rec = do(t, h, http.MethodPost, "/api/v1/auth/login",
-		fmt.Sprintf(`{"username":"admin","password":"correct horse battery","totp":%q}`, currentTOTP(t, secret)), nil)
+		fmt.Sprintf(`{"username":"admin","password":"correct horse battery","totp":%q}`, nextTOTP(t, secret)), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("post-enable TOTP login = %d: %s", rec.Code, rec.Body.String())
 	}

@@ -35,6 +35,14 @@ jobs:
       - name: cross-compile linux/amd64
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/drevantad-ci ./cmd/drevantad
 
+      # Advisory scans: report (and surface annotations) without blocking
+      # the pipeline — the operator reviews the findings on each run.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+        continue-on-error: true
+
   acme:
     name: "ACME integration — pebble IP-cert issue, renew, proxy"
     runs-on: ubuntu-latest
@@ -109,3 +117,8 @@ jobs:
       - name: static build
         working-directory: web
         run: npm run build
+
+      - name: npm audit (non-dev dependencies)
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true

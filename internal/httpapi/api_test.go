@@ -451,6 +451,18 @@ func currentTOTP(t *testing.T, secret string) string {
 	return code
 }
 
+// nextTOTP returns the code for the NEXT 30-second window: sign-ins that
+// happen right after an enrolment verify must not reuse the consumed
+// step (the replay guard rejects step <= MFALastStep).
+func nextTOTP(t *testing.T, secret string) string {
+	t.Helper()
+	code, err := auth.ComputeTOTP(secret, time.Now().Add(31*time.Second))
+	if err != nil {
+		t.Fatalf("totp: %v", err)
+	}
+	return code
+}
+
 // TestClaimTokenRegeneration pins the locked regeneration semantics end to
 // end: rotating before the claim invalidates the previous token, the new
 // token claims exactly once, and a consumed token is rejected on replay.

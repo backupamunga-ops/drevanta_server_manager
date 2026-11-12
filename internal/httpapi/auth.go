@@ -611,7 +611,8 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The identifier may be the username or the account email.
-	user, err := s.st.UserByIdentifier(r.Context(), strings.TrimSpace(req.Username))
+	ident := strings.TrimSpace(req.Username)
+	user, err := s.st.UserByIdentifier(r.Context(), ident)
 	if errors.Is(err, store.ErrNotFound) {
 		audit(r.Context(), s.st, req.Username, "login_failed", "auth", map[string]any{"reason": "invalid_credentials"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
@@ -619,6 +620,19 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "account unavailable")
+		return
+	}
+
+	// Per-account failure lockout: caps brute-force attempts against ONE
+	// account even when spread across many source addresses.
+	failKey := "login:" + user.Username
+	if s.fails.Locked(failKey) {
+		audit(r.Context(), s.st, user.Username, "login_failed", "auth", map[string]any{"reason": "account_locked"})
+		writeError(w, http.StatusTooManyRequests, "account_locked", "too many failed attempts for this account \u2014 wait a few minutes")
+		return
+	}
+	if len(req.TOTP) > 64 {
+		writeError(w, http.StatusBadRequest, "invalid_input", "code too long")
 		return
 	}
 
@@ -632,6 +646,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if auth.VerifyPassword(req.Password, user.PasswordHash) != nil {
+		s.fails.Record(failKey)
 		audit(r.Context(), s.st, req.Username, "login_failed", "auth", map[string]any{"reason": "invalid_credentials"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or password")
 		return
@@ -662,14 +677,29 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if sixDigitRE.MatchString(code) {
 			step, ok, err := auth.VerifyTOTP(user.MFASecret, code, time.Now())
 			if err != nil || !ok {
+				s.fails.Record(failKey)
 				audit(r.Context(), s.st, req.Username, "login_failed", "auth", map[string]any{"reason": "totp_invalid"})
 				writeError(w, http.StatusUnauthorized, "totp_invalid", "invalid authenticator code")
 				return
 			}
-			_ = step // matched step; kept for future replay-hardening
+			// Replay guard: a code from an OLDER step than the last accepted one
+			// is rejected (an old phished code cannot be reused later). Same-window
+			// reuse stays allowed for quick re-logins, per the design note in
+			// internal/auth/totp.go; the accepted step is recorded either way.
+			if step < user.MFALastStep {
+				s.fails.Record(failKey)
+				audit(r.Context(), s.st, user.Username, "login_failed", "auth", map[string]any{"reason": "totp_replay"})
+				writeError(w, http.StatusUnauthorized, "totp_invalid", "invalid authenticator code")
+				return
+			}
+			if err := s.st.AcceptMFAStep(r.Context(), user.ID, step); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", "could not record the code step")
+				return
+			}
 		} else {
 			used, err := s.st.ConsumeRecoveryCode(r.Context(), user.ID, auth.HashRecoveryCode(auth.NormalizeRecoveryCode(code)))
 			if err != nil || !used {
+				s.fails.Record(failKey)
 				audit(r.Context(), s.st, req.Username, "login_failed", "auth", map[string]any{"reason": "recovery_invalid"})
 				writeError(w, http.StatusUnauthorized, "recovery_invalid", "invalid recovery code")
 				return
@@ -688,6 +718,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not start session")
 		return
 	}
+	s.fails.Reset(failKey)
 	audit(r.Context(), s.st, req.Username, "login_success", "auth", map[string]any{"scope": scope})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":            map[string]any{"username": user.Username, "mfa_enabled": user.MFAEnabled},

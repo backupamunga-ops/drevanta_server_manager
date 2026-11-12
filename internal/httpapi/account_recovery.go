@@ -102,16 +102,29 @@ func (s *server) handleRecoveryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	failKey := "login:" + user.Username
+	if s.fails.Locked(failKey) {
+		audit(r.Context(), s.st, user.Username, "login_failed", "auth", map[string]any{"reason": "account_locked"})
+		writeError(w, http.StatusTooManyRequests, "account_locked", "too many failed attempts for this account \u2014 wait a few minutes")
+		return
+	}
+	if len(code) > 64 {
+		writeError(w, http.StatusBadRequest, "invalid_input", "code too long")
+		return
+	}
+
 	// Bounded argon2-free path: recovery codes are SHA-256 comparisons,
 	// but the same constant response applies whatever fails.
 	used, err := s.st.ConsumeRecoveryCode(r.Context(), user.ID,
 		auth.HashRecoveryCode(auth.NormalizeRecoveryCode(code)))
 	if err != nil || !used {
+		s.fails.Record(failKey)
 		audit(r.Context(), s.st, user.Username, "login_failed", "auth", map[string]any{"reason": "recovery_invalid"})
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid username or recovery code")
 		return
 	}
 	audit(r.Context(), s.st, user.Username, "recovery_code_used", "auth", nil)
+	s.fails.Reset(failKey)
 	audit(r.Context(), s.st, user.Username, "recovery_login", "auth", nil)
 
 	if err := s.newSession(w, r, user.ID, store.ScopeRecovery); err != nil {
@@ -260,6 +273,27 @@ func (s *server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {
 	ended, _ := s.st.DeleteAllSessions(r.Context(), userID)
 	_ = ended
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---------------------------------------------------------------------------
+// Sign out everywhere (full scope)
+// ---------------------------------------------------------------------------
+
+// handleSessionsOut ends EVERY session of the signed-in user, including
+// the current one — the console then returns to the sign-in screen.
+func (s *server) handleSessionsOut(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "sign in required")
+		return
+	}
+	ended, err := s.st.DeleteAllSessions(r.Context(), sess.rec.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "could not end the sessions")
+		return
+	}
+	audit(r.Context(), s.st, sess.username, "logout_all", "auth", map[string]any{"sessions_ended": ended})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ended": ended})
 }
 
 // ---------------------------------------------------------------------------

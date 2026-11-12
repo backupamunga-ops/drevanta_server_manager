@@ -29,6 +29,7 @@
 //	POST /api/v1/account/password          — change password, ends other sessions (full or recovery scope)
 //	GET  /api/v1/account/smtp              — mail delivery settings (full scope)
 //	POST /api/v1/account/smtp              — save mail delivery settings (full scope)
+//	POST /api/v1/account/sessions/out      — sign out everywhere (full scope)
 //	POST /api/v1/account/smtp/test         — send a test message (full scope)
 //	POST /api/v1/account/mfa/setup         — begin TOTP enrolment later (full scope)
 //	POST /api/v1/account/mfa/verify        — enable MFA later, issue recovery codes (full scope)
@@ -64,6 +65,7 @@ type server struct {
 	argonSlots chan struct{}
 	access     *AccessView // nil in identity-only test rigs: access endpoints then 503
 	challenges *mfaChallengeStore
+	fails      *auth.FailureLimiter
 }
 
 // argonConcurrency bounds how many password verifications run at once.
@@ -114,6 +116,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 		argonSlots: make(chan struct{}, argonConcurrency),
 		access:     access,
 		challenges: newMFAChallengeStore(),
+		fails:      auth.NewFailureLimiter(10, 15*time.Minute, 5*time.Minute),
 	}
 	mux := http.NewServeMux()
 
@@ -144,6 +147,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 
 	// --- Account profile (email + password management) ---
 	mux.Handle("GET /api/v1/account/profile", srv.requireFullSession(srv.handleAccountProfile))
+	mux.Handle("POST /api/v1/account/sessions/out", srv.guard(srv.requireFullSession(srv.handleSessionsOut).ServeHTTP))
 	mux.Handle("GET /api/v1/account/smtp", srv.requireFullSession(srv.handleSMTPGet))
 	mux.Handle("POST /api/v1/account/smtp", srv.guard(srv.requireFullSession(srv.handleSMTPSet).ServeHTTP))
 	mux.Handle("POST /api/v1/account/smtp/test", srv.guard(srv.requireFullSession(srv.handleSMTPTest).ServeHTTP))
@@ -168,7 +172,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 
 	mux.Handle("GET /", dashboard.Handler())
 
-	return recoverAndLog(mux)
+	return recoverAndLog(securityHeaders(mux))
 }
 
 func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
