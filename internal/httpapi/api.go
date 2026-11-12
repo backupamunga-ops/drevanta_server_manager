@@ -9,6 +9,7 @@
 //	GET  /api/v1/server/metrics            — on-demand snapshot (session, full scope)
 //	GET  /api/v1/auth/session              — current session state
 //	POST /api/v1/auth/login                — login (TOTP / recovery code when MFA on)
+//	POST /api/v1/auth/login/mfa            — two-step completion (mfa_challenge + code)
 //	POST /api/v1/auth/logout               — logout
 //	GET  /api/v1/onboarding/status         — first-owner onboarding state
 //	POST /api/v1/onboarding/claim          — claim token + administrator creation
@@ -51,6 +52,7 @@ type server struct {
 	limiter    *auth.RateLimiter
 	argonSlots chan struct{}
 	access     *AccessView // nil in identity-only test rigs: access endpoints then 503
+	challenges *mfaChallengeStore
 }
 
 // argonConcurrency bounds how many password verifications run at once.
@@ -78,6 +80,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 		limiter:    auth.NewRateLimiter(10, time.Minute),
 		argonSlots: make(chan struct{}, argonConcurrency),
 		access:     access,
+		challenges: newMFAChallengeStore(),
 	}
 	mux := http.NewServeMux()
 
@@ -89,6 +92,7 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	// --- Sprint 2 identity / onboarding ---
 	mux.HandleFunc("GET /api/v1/auth/session", srv.handleSessionInfo)
 	mux.Handle("POST /api/v1/auth/login", srv.guard(srv.handleLogin))
+	mux.Handle("POST /api/v1/auth/login/mfa", srv.guard(srv.handleLoginMFA))
 	mux.Handle("POST /api/v1/auth/logout", srv.guard(srv.handleLogout))
 	mux.HandleFunc("GET /api/v1/onboarding/status", srv.handleOnboardingStatus)
 	mux.Handle("POST /api/v1/onboarding/claim", srv.guard(srv.handleClaim))

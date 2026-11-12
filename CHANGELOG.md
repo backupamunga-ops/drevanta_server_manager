@@ -4,6 +4,29 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.15] — the sign-in survives a mobile reload: server-side MFA challenges
+
+### Added
+- **Two-step sign-in now survives page reloads** (the mobile
+  app-switch bug). Login answers a verified password with a
+  short-lived `mfa_challenge` token — 5-minute TTL, max 5 code
+  attempts, single-use, stored hashed, memory-only. The browser keeps
+  it in sessionStorage: switching to the authenticator app and back —
+  which reloads the page on mobile — now restores the Two-step
+  verification screen instead of dropping the user onto the
+  credentials form. The challenge completes through
+  `POST /api/v1/auth/login/mfa` `{challenge, code}`; it grants no
+  access by itself, only narrows the remaining proof to a valid
+  second factor.
+- Exhausted or expired challenges ("too many wrong codes — enter your
+  username and password again") return the user to step 1 with the
+  reason; a daemon restart simply expires every outstanding challenge.
+
+### Changed
+- **Header/footer de-duplication.** The header shows the brand only;
+  the access chip moved to the footer next to the app version (read
+  from `/healthz`). Nothing repeats anymore.
+
 ## [0.4.14] — sign-in is two screens: credentials, then the code
 
 ### Changed

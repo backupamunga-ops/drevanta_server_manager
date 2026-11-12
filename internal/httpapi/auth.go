@@ -639,7 +639,21 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if state.Status == store.StatusActive && user.MFAEnabled {
 		code := strings.TrimSpace(req.TOTP)
 		if code == "" {
-			writeError(w, http.StatusUnauthorized, "totp_required", "authenticator code required")
+			token, cerr := s.challenges.issue(user.ID, user.Username)
+			if cerr != nil {
+				writeError(w, http.StatusInternalServerError, "internal", "could not start two-step sign-in")
+				return
+			}
+			// The challenge carries no authority: it only narrows the
+			// remaining proof to a valid second factor, and it lets the
+			// browser survive a page reload (mobile app switch) without
+			// re-entering the password.
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error":         "totp_required",
+				"message":       "authenticator code required",
+				"mfa_challenge": token,
+				"username":      user.Username,
+			})
 			return
 		}
 		if sixDigitRE.MatchString(code) {

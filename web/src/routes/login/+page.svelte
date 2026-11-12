@@ -5,8 +5,8 @@
 
         // Two-step sign-in: credentials first, then the authenticator-code
         // screen. The backend drives this — a verified password with MFA on
-        // answers 401 totp_required, which moves us to the second screen
-        // (it is a challenge, not an error).
+        // answers 401 totp_required with a short-lived mfa_challenge token,
+        // which moves us to the second screen (a challenge, not an error).
         type Step = 'credentials' | 'mfa';
         let step = $state<Step>('credentials');
         let username = $state('');
@@ -15,6 +15,52 @@
         let showPassword = $state(false);
         let busy = $state(false);
         let error = $state('');
+
+        // The pending two-step sign-in. sessionStorage (NOT localStorage:
+        // a new tab/window must start fresh) survives the page reload that
+        // mobile browsers trigger when the user switches to their
+        // authenticator app and back — without it the reload dropped the
+        // user back onto the credentials screen mid-flow.
+        const MFA_STORE_KEY = 'drevanta_mfa_signin';
+        let challenge = $state('');
+
+        function loadMfaStore(): { challenge: string; username: string } | null {
+                try {
+                        const raw = sessionStorage.getItem(MFA_STORE_KEY);
+                        if (!raw) return null;
+                        const parsed = JSON.parse(raw) as { challenge?: string; username?: string };
+                        if (!parsed?.challenge) return null;
+                        return { challenge: parsed.challenge, username: parsed.username ?? '' };
+                } catch {
+                        return null;
+                }
+        }
+
+        function storeMfa(m: { challenge: string; username: string }) {
+                try {
+                        sessionStorage.setItem(MFA_STORE_KEY, JSON.stringify(m));
+                } catch {
+                        /* private mode etc. — the flow still works without the reload guard */
+                }
+        }
+
+        function clearMfa() {
+                try {
+                        sessionStorage.removeItem(MFA_STORE_KEY);
+                } catch {
+                        /* ignore */
+                }
+        }
+
+        // Restore a pending two-step sign-in after a reload.
+        $effect(() => {
+                const saved = loadMfaStore();
+                if (saved) {
+                        username = saved.username;
+                        challenge = saved.challenge;
+                        step = 'mfa';
+                }
+        });
 
         // Trusted access mode from the daemon (never the browser URL): the
         // subtitle is honest about how this console is being reached.
@@ -32,6 +78,8 @@
         });
 
         function backToCredentials() {
+                clearMfa();
+                challenge = '';
                 step = 'credentials';
                 totp = '';
                 error = '';
@@ -42,22 +90,54 @@
                 busy = true;
                 error = '';
                 try {
+                        if (step === 'mfa') {
+                                // Step 2: prove the second factor against the challenge.
+                                const res = await postJSON<LoginResult>('/api/v1/auth/login/mfa', {
+                                        challenge,
+                                        code: totp
+                                });
+                                clearMfa();
+                                challenge = '';
+                                await routeAfterLogin(res);
+                                return;
+                        }
                         const res = await postJSON<LoginResult>('/api/v1/auth/login', {
                                 username,
                                 password,
                                 totp: totp || undefined
                         });
-                        if (res.scope === 'onboarding') {
-                                await goto('/onboarding');
-                        } else {
-                                await goto('/');
-                        }
+                        clearMfa();
+                        await routeAfterLogin(res);
                 } catch (err) {
                         if (err instanceof ApiError) {
                                 if (err.code === 'totp_required') {
                                         // Password verified — advance to the code screen.
+                                        challenge =
+                                                typeof err.data?.['mfa_challenge'] === 'string'
+                                                        ? (err.data['mfa_challenge'] as string)
+                                                        : '';
+                                        if (challenge) {
+                                                storeMfa({
+                                                        challenge,
+                                                        username:
+                                                                typeof err.data?.['username'] === 'string'
+                                                                        ? (err.data['username'] as string)
+                                                                        : username
+                                                });
+                                        }
                                         step = 'mfa';
                                         totp = '';
+                                } else if (
+                                        step === 'mfa' &&
+                                        (err.code === 'challenge_invalid' || err.code === 'challenge_exhausted')
+                                ) {
+                                        // The challenge died (expired, used up, daemon restart).
+                                        // Start over from the credentials screen.
+                                        clearMfa();
+                                        challenge = '';
+                                        step = 'credentials';
+                                        totp = '';
+                                        error = err.message;
                                 } else if (err.code === 'instance_unclaimed') {
                                         error = 'No administrator exists yet. Use the claim token from the installer via the onboarding wizard.';
                                 } else {
@@ -70,6 +150,14 @@
                         }
                 } finally {
                         busy = false;
+                }
+        }
+
+        async function routeAfterLogin(res: LoginResult) {
+                if (res.scope === 'onboarding') {
+                        await goto('/onboarding');
+                } else {
+                        await goto('/');
                 }
         }
 

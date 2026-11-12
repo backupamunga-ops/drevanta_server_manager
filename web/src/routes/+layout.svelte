@@ -33,6 +33,18 @@
         });
         const label = $derived(accessLabel(access));
         const labelTitle = $derived(accessLabelTitle(access));
+
+        // App version from the daemon's public /healthz — shown once, in
+        // the footer, next to the access chip. Empty until it loads.
+        let version = $state('');
+        $effect(() => {
+                fetch('/healthz', { headers: { accept: 'application/json' } })
+                        .then((r) => (r.ok ? r.json() : null))
+                        .then((h: { version?: string } | null) => {
+                                if (h?.version) version = h.version;
+                        })
+                        .catch(() => undefined);
+        });
 </script>
 
 {#if bare}
@@ -45,7 +57,6 @@
                                 <span class="brand-name">Drevanta</span>
                                 <span class="brand-sub">server console</span>
                         </div>
-                        <div class="conn" title={labelTitle}>{label}</div>
                 </header>
 
                 <main>
@@ -53,8 +64,8 @@
                 </main>
 
                 <footer>
-                        <span>Drevanta · private server console</span>
                         <span title={labelTitle}>{label}</span>
+                        <span class="version">{version ? `v${version}` : ''}</span>
                 </footer>
         </div>
 {/if}
@@ -104,15 +115,6 @@
                 font-size: 13px;
         }
 
-        .conn {
-                color: var(--text-dim);
-                font-size: 12px;
-        }
-
-        main {
-                flex: 1;
-        }
-
         footer {
                 display: flex;
                 justify-content: space-between;
@@ -122,5 +124,12 @@
                 border-top: 1px solid var(--border);
                 color: var(--text-dim);
                 font-size: 12px;
+        }
+
+        .version {
+                font-variant-numeric: tabular-nums;
+        }
+        main {
+                flex: 1;
         }
 </style>
