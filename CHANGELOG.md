@@ -4,6 +4,34 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.4.19] — proper settings shell + Phase 2 groundwork
+
+### Changed
+- **Settings is a sectioned page.** The temporary single-scroll
+  `/settings` page is replaced by a section shell — Account, Security,
+  Mail delivery, Access — switched from a sticky sidebar on desktop and
+  a chip row on mobile, with deep links (`/settings?section=security`)
+  and one component per section under
+  `web/src/routes/settings/sections/`. All functionality is carried
+  over unchanged. "Sign out everywhere" moved from the password form to
+  Security → Sessions, and the dashboard's `mfa off` pill now deep-links
+  to the Security section.
+- Shared UI primitives promoted to `app.css` (`.pill` family,
+  `.ok-line`/`.warn-line`, `.field-error`, `.stack`, `.row`, `.mono`,
+  `.hint`, `.muted`, `.page-head`) so pages stop re-declaring them with
+  drifted values; inline form errors use `.field-error`, the `.error`
+  box is reserved for page-level alerts.
+
+### Added
+- **docs/DESIGN_PRINCIPLES.md** — the dashboard's design rules (tokens,
+  primitives, forms, buttons, status honesty, accessibility, screenshot
+  conventions) codified as the standard every Phase 2 page must follow.
+- **docs/PHASE2_PLAN.md** — the Phase 2 PRD mapped onto Drevanta:
+  milestones P2.0–P2.5 as versions 0.5.0–0.6.0-beta.1, Phase 1 naming
+  kept (`drevantad`, privileged helper = `drevanta-helper`), open
+  product decisions (reseller switching, support access, file roots)
+  flagged with what they block.
+
 ## [0.4.18] — security hardening pack
 
 ### Added

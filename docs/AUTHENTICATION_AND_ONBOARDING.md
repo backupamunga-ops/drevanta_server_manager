@@ -10,7 +10,7 @@ states you can meet along the way.
 equal-sized images* — desktop on the left, mobile on the right — with a
 single shared caption underneath. Desktop shots are 1440×900, mobile
 shots 390×844; the console is fully responsive, and both views come
-from v0.4.18.
+from v0.4.18 (Settings from v0.4.19's sectioned page).
 
 ---
 
@@ -334,26 +334,31 @@ audit event.
 
 ## 10. Managing the account — Settings
 
-Settings holds four groups: **Account** (email + password), **Email
-delivery** (SMTP), **Account security**, and **Access address**.
+Settings is a sectioned page — **Account**, **Security**, **Mail
+delivery**, **Access** — switched from a sidebar on desktop and a chip
+row on mobile. Every section has a deep link of the form
+`/settings?section=security`, and the dashboard's `mfa off` pill jumps
+straight to Security.
 
 | Desktop | Mobile |
 |:---:|:---:|
-| ![Settings — desktop](images/desk-11-settings-account-smtp.png) | ![Settings — mobile](images/mob-11-settings-account-smtp.png) |
+| ![Settings — desktop](images/desk-11-settings-account.png) | ![Settings — mobile](images/mob-11-settings-account.png) |
 
-*Settings — account, mail delivery, security and access address.*
+*Settings — the Account section; the sidebar switches sections.*
 
-- **Email** — change or clear it; sign-in falls back to username-only
-  when cleared. Uniqueness is enforced case-insensitively.
-- **Change password** — requires the current password; every OTHER
-  device is signed out (the count is shown).
-- **Sign out everywhere** — ends all sessions including this one.
-- **Email delivery (SMTP)** — host, port (implicit TLS on 465, STARTTLS
+- **Account** — change or clear the email (sign-in falls back to
+  username-only when cleared; uniqueness is enforced
+  case-insensitively), and change the password, which requires the
+  current password and signs out every OTHER device (the count is
+  shown).
+- **Security** — enable MFA at any time (recovery codes are issued
+  then and shown once) and sign out everywhere, ending all sessions
+  including the current one.
+- **Mail delivery** — host, port (implicit TLS on 465, STARTTLS
   otherwise), credentials and From address, plus a "Send test message"
   button that reports sender errors verbatim. The password is stored
   server-side and never displayed again.
-- **Account security** — enable MFA later or regenerate recovery codes.
-- **Access address** — add/remove the custom domain; warns when the
+- **Access** — add/remove the custom domain; warns when the
   certificate has ≤ 14 days left.
 
 The dashboard you land on after sign-in:
@@ -436,6 +441,6 @@ The dashboard you land on after sign-in:
 
 ---
 
-*Manual for Drevanta v0.4.18. Screenshots live in `docs/images/` — in
+*Manual for Drevanta v0.4.18 (Settings: v0.4.19). Screenshots live in `docs/images/` — in
 every pair the desktop shot (`desk-…`) is on the left, the mobile shot
 (`mob-…`) on the right.*

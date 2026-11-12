@@ -92,11 +92,11 @@
                         {#if session?.mfa_enabled}
                                 <span class="mfa-pill" title="multi-factor authentication is enabled">mfa on</span>
                         {:else}
-                                <a
-                                        class="mfa-pill warn"
-                                        href="/settings"
-                                        title="MFA is not enabled — set it up under Account Security"
-                                >mfa off</a>
+						<a
+								class="mfa-pill warn"
+								href="/settings?section=security"
+								title="MFA is not enabled — set it up under Settings → Security"
+						>mfa off</a>
                         {/if}
                 </div>
                 <div class="userbox">
