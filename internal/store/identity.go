@@ -88,6 +88,10 @@ type Session struct {
 	AbsoluteAt time.Time
 	ExpiresAt  time.Time
 	LastSeenAt time.Time
+	// ActiveWorkspaceID is ADVISORY UI context (RFC §7): which workspace
+	// the shell renders. It is never an authorization input — every
+	// request re-checks membership via Can(). 0 = unset (server context).
+	ActiveWorkspaceID int64
 }
 
 func parseTime(s string) time.Time {
@@ -551,11 +555,12 @@ func (s *Store) SessionByHash(ctx context.Context, tokenHash string) (Session, e
 		sess                                 Session
 		userID                               int64
 		created, absolute, expires, lastSeen string
+		activeWS                             sql.NullInt64
 	)
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, token_hash, user_id, scope, created_at, absolute_at, expires_at, last_seen_at
+SELECT id, token_hash, user_id, scope, created_at, absolute_at, expires_at, last_seen_at, active_workspace_id
 FROM sessions WHERE token_hash = ?`, tokenHash).
-		Scan(&sess.ID, &sess.TokenHash, &userID, &sess.Scope, &created, &absolute, &expires, &lastSeen)
+		Scan(&sess.ID, &sess.TokenHash, &userID, &sess.Scope, &created, &absolute, &expires, &lastSeen, &activeWS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sess, ErrNotFound
 	}
@@ -567,6 +572,7 @@ FROM sessions WHERE token_hash = ?`, tokenHash).
 	sess.AbsoluteAt = parseTime(absolute)
 	sess.ExpiresAt = parseTime(expires)
 	sess.LastSeenAt = parseTime(lastSeen)
+	sess.ActiveWorkspaceID = activeWS.Int64
 	if !sess.ExpiresAt.After(now) || !sess.AbsoluteAt.After(now) {
 		_ = s.DeleteSession(ctx, tokenHash)
 		return sess, ErrNotFound

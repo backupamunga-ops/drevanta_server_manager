@@ -35,11 +35,25 @@
 //	POST /api/v1/account/mfa/verify        — enable MFA later, issue recovery codes (full scope)
 //	GET  /                                 — embedded SvelteKit dashboard
 //
+// P2.0 workspaces (PRD §5; RFC docs/phase-2/P2.0-identity-workspaces.md):
+//
+//	GET    /api/v1/workspaces                      — the caller's memberships (full scope)
+//	POST   /api/v1/workspaces                      — create hosting_org (server admin)
+//	GET    /api/v1/workspaces/{id}                 — workspace detail + members
+//	POST   /api/v1/workspaces/{id}/enter           — switch advisory context (membership required)
+//	POST   /api/v1/workspaces/{id}/invitations     — invite member (members.invite)
+//	DELETE /api/v1/workspaces/{id}/invitations/{n} — revoke invitation (members.manage)
+//	DELETE /api/v1/workspaces/{id}/members/{n}     — revoke membership (members.manage)
+//	GET    /api/v1/workspaces/invitations/{token}  — invitation preview (public, rate limited)
+//	POST   /api/v1/workspaces/invitations/accept   — accept (session attach or account creation)
+//
 // /healthz and /readyz stay unauthenticated by design (systemd and
 // monitoring need them and they reveal nothing); /api/v1/access/status
 // is public but carries the same secret-free facts the installer
 // prints; every other /api route requires a session, and metrics,
-// account and domain routes additionally require full scope.
+// account and domain routes additionally require full scope. Metrics
+// and domain routes also require the SERVER workspace context (P2.0:
+// a hosting-organization context answers 403 workspace_mismatch).
 package httpapi
 
 import (
@@ -53,6 +67,7 @@ import (
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/auth"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/metrics"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/workspaces"
 	dashboard "github.com/backupamunga-ops/drevanta_server_manager/web"
 )
 
@@ -123,7 +138,10 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	// --- Frozen Sprint 1 surface ---
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /readyz", srv.handleReadyz)
-	mux.Handle("GET /api/v1/server/metrics", srv.requireFullSession(srv.handleMetrics))
+	// Server-scoped surfaces additionally require the server workspace
+	// context (P2.0): switching into a hosting org hides them.
+	mux.Handle("GET /api/v1/server/metrics",
+		srv.requireFullSession(srv.requireServerContext(srv.handleMetrics).ServeHTTP))
 
 	// --- Sprint 2 identity / onboarding ---
 	mux.HandleFunc("GET /api/v1/auth/session", srv.handleSessionInfo)
@@ -141,9 +159,33 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 
 	// --- Post-install access (trusted configuration, never the URL) ---
 	mux.HandleFunc("GET /api/v1/access/status", srv.handleAccessStatus)
-	mux.Handle("POST /api/v1/access/domain/check", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainCheck)))
-	mux.Handle("POST /api/v1/access/domain/apply", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainApply)))
-	mux.Handle("POST /api/v1/access/domain/remove", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleDomainRemove)))
+	mux.Handle("POST /api/v1/access/domain/check",
+		srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.requireServerContext(srv.handleDomainCheck).ServeHTTP)))
+	mux.Handle("POST /api/v1/access/domain/apply",
+		srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.requireServerContext(srv.handleDomainApply).ServeHTTP)))
+	mux.Handle("POST /api/v1/access/domain/remove",
+		srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.requireServerContext(srv.handleDomainRemove).ServeHTTP)))
+
+	// --- P2.0 workspaces (identity foundation) ---
+	mux.Handle("GET /api/v1/workspaces", srv.requireFullSession(srv.handleWorkspacesList))
+	mux.Handle("POST /api/v1/workspaces", srv.guard(srv.requireFullSession(srv.handleWorkspaceCreate).ServeHTTP))
+	mux.Handle("GET /api/v1/workspaces/{id}", srv.requireFullSession(srv.handleWorkspaceDetail))
+	mux.Handle("POST /api/v1/workspaces/{id}/enter",
+		srv.guard(srv.requireFullSession(srv.handleWorkspaceEnter).ServeHTTP))
+	mux.Handle("POST /api/v1/workspaces/{id}/invitations",
+		srv.guard(srv.requireFullSession(
+			srv.requireWorkspacePermission(workspaces.PWorkspaceMembersInvite, srv.handleWorkspaceInvite).ServeHTTP).ServeHTTP))
+	mux.Handle("DELETE /api/v1/workspaces/{id}/invitations/{invID}",
+		srv.guard(srv.requireFullSession(
+			srv.requireWorkspacePermission(workspaces.PWorkspaceMembersManage, srv.handleWorkspaceInvitationRevoke).ServeHTTP).ServeHTTP))
+	mux.Handle("DELETE /api/v1/workspaces/{id}/members/{userID}",
+		srv.guard(srv.requireFullSession(
+			srv.requireWorkspacePermission(workspaces.PWorkspaceMembersManage, srv.handleWorkspaceMemberRemove).ServeHTTP).ServeHTTP))
+	// Invitation preview and acceptance: the 256-bit token is the only
+	// credential; acceptance attaches to an existing session or creates
+	// the invitee's account (PRD §5.4).
+	mux.HandleFunc("GET /api/v1/workspaces/invitations/{token}", srv.handleInvitationPreview)
+	mux.Handle("POST /api/v1/workspaces/invitations/accept", srv.guard(srv.handleInvitationAccept))
 
 	// --- Account profile (email + password management) ---
 	mux.Handle("GET /api/v1/account/profile", srv.requireFullSession(srv.handleAccountProfile))
@@ -162,11 +204,15 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	mux.Handle("POST /api/v1/account/mfa/verify", srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.handleAccountMFAVerify)))
 
 	// Strict API namespace: unknown /api/* paths are 404 JSON, never the
-	// SPA fallback.
+	// SPA fallback — for every method, not just GET/POST (P2.0 adds
+	// DELETE workspace routes, so unknown DELETEs must not hit the SPA).
 	mux.HandleFunc("GET /api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	})
 	mux.HandleFunc("POST /api/", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+	})
+	mux.HandleFunc("DELETE /api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	})
 

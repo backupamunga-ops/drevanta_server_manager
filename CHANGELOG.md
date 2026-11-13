@@ -4,6 +4,81 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+# Changelog
+
+All notable changes to Drevanta are documented here.
+Format follows Keep a Changelog; versioning is CalVer-ish per sprint
+(`0.<sprint>.<stage>`).
+
+## [0.5.0] — P2.0 identity foundation: workspaces, personas, memberships
+
+Phase 2.0 begins (Phase 2 plan, milestone P2.0). The decided identity
+model from `docs/phase-2/P2.0-identity-workspaces.md` (OD-001, decided
+2026-11-13) is implemented: four personas, four workspace types, one
+login with many memberships, and switching that never grants
+privileges.
+
+### Added
+- **Workspace schema (migration 0005).** `workspaces` (types `server`,
+  `hosting_org`, `website`, `developer_project`; `business_type`
+  attribute `reseller | hosting_provider | agency` on orgs),
+  `workspace_memberships` (one role per user per workspace), `roles`,
+  `permissions`, `role_permissions`, `workspace_invitations`, and the
+  dormant `support_grants` model (OD-002 policy pending). Sessions gain
+  an advisory `active_workspace_id` — UI context only, never an
+  authorization input.
+- **Permission registry** (`internal/workspaces`). The PRD §6.2
+  namespace shipped as data, seeded into SQLite by the migration (same
+  transaction), plus one documented extension: `hosting.org.create`
+  (PRD §5.6 rule 1 — server administrators create hosting
+  organizations). Role templates per PRD §6.1; runtime checks read the
+  database, so the effective policy is always inspectable in SQL.
+- **Authorization primitive `Can(user, workspace, permission)`.**
+  Re-reads live rows per request — revocation and expiry bite
+  immediately; no cached permissions (PRD §21.3).
+- **Workspace API.** `GET /api/v1/workspaces` (memberships + effective
+  permissions), `POST /api/v1/workspaces` (create hosting org — server
+  admins only), `POST /api/v1/workspaces/{id}/enter` (re-authorized
+  context switch, audited), `GET /api/v1/workspaces/{id}` (members +
+  role), invitations (`POST .../invitations`, preview, one-time
+  acceptance that attaches to an existing session or creates the
+  invitee's account), `DELETE .../members/{user}` and
+  `.../invitations/{id}` (last-owner protected).
+- **Real context switching.** Server-scoped surfaces (metrics, access
+  domain) answer `403 workspace_mismatch` outside the server workspace;
+  account settings stay available everywhere. A hosting-organization
+  member without server membership sees neither the server workspace
+  nor its endpoints — non-membership is a 404, no existence leak
+  (PRD §5.5).
+- **Header workspace selector** (SvelteKit shell). Lists live
+  memberships grouped by persona with role labels, the "New hosting
+  organization" form for `hosting.org.create` holders, and an
+  unmistakable context banner when working outside the server
+  workspace. The console lands in the session's active context and
+  switches honestly — no fake buttons (DESIGN_PRINCIPLES.md).
+- **`/org/{id}` workspace page.** Real member management (list, invite
+  with one-time links, revoke) plus an explicit foundation note: the
+  persona's management surfaces arrive with their milestones — nothing
+  here is pretending.
+- **`/invite` acceptance page.** Token preview without a session;
+  acceptance joins with the current account or creates a new one
+  (username/password, claim-flow validation).
+- **Claim provisions the first server workspace.** The Phase 1 owner's
+  access becomes their `server` workspace automatically; upgrades wrap
+  every existing account as server owner in the migration — sessions
+  keep working across the upgrade (RFC §6).
+
+### Fixed
+- **Flaky `TestLoginMFAChallengeFlow`** (pre-existing): the test's
+  `nextTOTP` helper (`now+31s`) jumped two 30-second TOTP windows when
+  called in the last second of a window, which the ±1-window drift then
+  rejected (~3% of full-suite runs). The helper is now boundary-safe.
+
+### Audit
+- New events: `workspace_switched`, `hosting_org_created`,
+  `workspace_invitation_created`, `workspace_invitation_revoked`,
+  `workspace_invitation_accepted`, `workspace_membership_revoked`.
+
 ## [0.4.19] — proper settings shell + Phase 2 groundwork
 
 ### Changed

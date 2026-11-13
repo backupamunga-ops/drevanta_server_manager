@@ -323,3 +323,176 @@ export function accountMfaSetup(): Promise<MfaSetup> {
 export function accountMfaVerify(code: string): Promise<MfaVerified> {
         return postJSON<MfaVerified>('/api/v1/account/mfa/verify', { code });
 }
+
+// --- P2.0 workspaces (identity foundation) ---
+
+export type WorkspaceType = 'server' | 'hosting_org' | 'website' | 'developer_project';
+
+export interface WorkspaceView {
+	id: number;
+	type: WorkspaceType;
+	name: string;
+	business_type?: string;
+	role: string;
+	state: string;
+	permissions: string[];
+}
+
+export interface WorkspacesList {
+	active_workspace_id: number;
+	workspaces: WorkspaceView[];
+}
+
+export interface WorkspaceMember {
+	user_id: number;
+	username: string;
+	role: string;
+	joined_at: string;
+}
+
+export interface WorkspaceInvitation {
+	id: number;
+	email: string;
+	role: string;
+	expires_at: string;
+}
+
+export interface WorkspaceDetail {
+	workspace: {
+		id: number;
+		type: WorkspaceType;
+		name: string;
+		business_type?: string;
+		state: string;
+	};
+	my_role: string;
+	permissions: string[];
+	members: WorkspaceMember[];
+	invitations?: WorkspaceInvitation[];
+}
+
+export interface InvitationCreated {
+	invitation: {
+		id: number;
+		email: string;
+		role: string;
+		expires_at: string;
+		url: string;
+		token: string;
+	};
+}
+
+export interface InvitationPreview {
+	workspace_name: string;
+	workspace_type: WorkspaceType;
+	business_type?: string;
+	role: string;
+	email: string;
+	expires_at: string;
+}
+
+export interface AcceptResult {
+	ok: boolean;
+	workspace_id: number;
+	role: string;
+	account_created: boolean;
+	next: string;
+}
+
+/** The caller's memberships; null when anonymous (selector stays hidden). */
+export async function fetchWorkspaces(): Promise<WorkspacesList | null> {
+	const res = await fetch('/api/v1/workspaces', { headers: { accept: 'application/json' } });
+	if (res.status === 401 || res.status === 403) return null;
+	if (!res.ok) throw new ApiError(res.status, 'http_error', `HTTP ${res.status}`);
+	return (await res.json()) as WorkspacesList;
+}
+
+/**
+ * Switch the session's advisory workspace context. Re-authorized
+ * server-side on every call — switching never grants privileges.
+ */
+export function enterWorkspace(id: number): Promise<{ ok: boolean; active_workspace_id: number }> {
+	return postJSON(`/api/v1/workspaces/${id}/enter`, {});
+}
+
+export function createHostingOrg(
+	name: string,
+	businessType: string
+): Promise<{ workspace: { id: number; name: string; business_type: string; role: string } }> {
+	return postJSON('/api/v1/workspaces', { name, business_type: businessType });
+}
+
+export function fetchWorkspaceDetail(id: number): Promise<WorkspaceDetail> {
+	return getJSON<WorkspaceDetail>(`/api/v1/workspaces/${id}`);
+}
+
+export function inviteMember(
+	id: number,
+	email: string,
+	role: string
+): Promise<InvitationCreated> {
+	return postJSON(`/api/v1/workspaces/${id}/invitations`, { email, role });
+}
+
+export async function deleteJSON<T>(url: string): Promise<T> {
+	const res = await fetch(url, {
+		method: 'DELETE',
+		headers: { accept: 'application/json' }
+	});
+	const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+	if (!res.ok) {
+		throw new ApiError(
+			res.status,
+			typeof data['error'] === 'string' ? (data['error'] as string) : 'unknown_error',
+			typeof data['message'] === 'string' ? (data['message'] as string) : `HTTP ${res.status}`,
+			data
+		);
+	}
+	return data as T;
+}
+
+export function revokeInvitation(id: number, invitationId: number): Promise<{ ok: boolean }> {
+	return deleteJSON(`/api/v1/workspaces/${id}/invitations/${invitationId}`);
+}
+
+export function removeMember(id: number, userId: number): Promise<{ ok: boolean }> {
+	return deleteJSON(`/api/v1/workspaces/${id}/members/${userId}`);
+}
+
+export function fetchInvitationPreview(token: string): Promise<InvitationPreview> {
+	return getJSON<InvitationPreview>(`/api/v1/workspaces/invitations/${encodeURIComponent(token)}`);
+}
+
+export function acceptInvitation(
+	token: string,
+	username?: string,
+	password?: string
+): Promise<AcceptResult> {
+	return postJSON('/api/v1/workspaces/invitations/accept', {
+		token,
+		...(username !== undefined ? { username } : {}),
+		...(password !== undefined ? { password } : {})
+	});
+}
+
+/** Human label for a workspace type/persona (PRD §4). */
+export function personaLabel(type: WorkspaceType): string {
+	switch (type) {
+		case 'server':
+			return 'Server';
+		case 'hosting_org':
+			return 'Hosting organization';
+		case 'website':
+			return 'Website';
+		case 'developer_project':
+			return 'Developer project';
+	}
+}
+
+/** Shipped role templates per workspace type (PRD §6.1). */
+export const ROLES_BY_TYPE: Record<WorkspaceType, string[]> = {
+	server: ['owner', 'administrator', 'operator', 'viewer'],
+	hosting_org: ['owner', 'manager', 'staff', 'viewer'],
+	website: ['owner', 'manager', 'viewer'],
+	developer_project: ['owner', 'maintainer', 'viewer']
+};

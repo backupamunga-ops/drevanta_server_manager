@@ -451,11 +451,19 @@ func currentTOTP(t *testing.T, secret string) string {
 	return code
 }
 
-// nextTOTP returns the code for the NEXT 30-second window: sign-ins that
-// happen right after an enrolment verify must not reuse the consumed
-// step (the replay guard rejects step <= MFALastStep).
+// nextTOTP returns a code that verifies cleanly against the server's
+// ±1-window drift immediately after it is generated. The previous
+// now+31s form jumped TWO windows when called in the last second of a
+// 30-second window (31 s > the boundary), which the ±1 drift then
+// rejected — a rare flake in full-suite runs. Near the boundary this
+// returns the same-window code instead: the replay guard rejects only
+// steps OLDER than the last accepted one, so same-window reuse stays
+// valid for quick re-logins (internal/auth design note).
 func nextTOTP(t *testing.T, secret string) string {
 	t.Helper()
+	if rem := 30 - (time.Now().Unix() % 30); rem < 2 {
+		return currentTOTP(t, secret)
+	}
 	code, err := auth.ComputeTOTP(secret, time.Now().Add(31*time.Second))
 	if err != nil {
 		t.Fatalf("totp: %v", err)

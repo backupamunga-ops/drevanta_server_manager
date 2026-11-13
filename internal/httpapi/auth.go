@@ -237,6 +237,14 @@ func (s *server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "wrong_state", "instance state changed during claim")
 		return
 	}
+	// P2.0: the first owner's access lives in their server workspace
+	// (RFC §6 — ScopeFull ≙ server owner). Compensation covers this too:
+	// an account without its workspace membership must not linger.
+	if err := s.st.EnsureServerMembership(r.Context(), user.ID); err != nil {
+		_ = s.st.DeleteUser(r.Context(), user.ID)
+		writeError(w, http.StatusInternalServerError, "internal", "could not provision workspace access")
+		return
+	}
 
 	if err := s.newSession(w, r, user.ID, store.ScopeOnboarding); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "could not start session")

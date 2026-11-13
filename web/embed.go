@@ -26,6 +26,7 @@ var prettyPages = map[string]string{
 	"onboarding": "onboarding.html",
 	"login":      "login.html",
 	"settings":   "settings.html",
+	"invite":     "invite.html",
 }
 
 // Handler serves the embedded static dashboard with an index.html

@@ -2,15 +2,21 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/workspaces"
 )
 
 type migration struct {
 	version int
 	name    string
 	up      string
+	// seed optionally inserts default rows inside the SAME transaction
+	// as up, so schema and shipped defaults land atomically.
+	seed func(ctx context.Context, tx *sql.Tx) error
 }
 
 // migrations is the ordered, append-only list of schema versions.
@@ -139,6 +145,130 @@ CREATE TABLE IF NOT EXISTS password_resets (
 CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets (user_id);
 `,
 	},
+	{
+		version: 5,
+		name:    "workspaces_identity_foundation",
+		up: `
+-- P2.0 identity foundation (PRD §21.2, RFC docs/phase-2/P2.0-identity-workspaces.md).
+-- Four workspace types; hosting_org carries a business_type attribute
+-- (reseller | hosting_provider | agency) instead of three persona systems.
+CREATE TABLE workspaces (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        type              TEXT NOT NULL CHECK (type IN
+                ('server','hosting_org','website','developer_project')),
+        name              TEXT NOT NULL,
+        business_type     TEXT CHECK (business_type IS NULL OR business_type IN
+                ('reseller','hosting_provider','agency')),
+        parent_workspace_id INTEGER REFERENCES workspaces(id),
+        state             TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','archived')),
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        CHECK (type != 'hosting_org' OR business_type IS NOT NULL)
+);
+
+-- Role templates (PRD §6.1) and the permission namespace (PRD §6.2).
+-- Rows are seeded from internal/workspaces (single source of truth).
+CREATE TABLE roles (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_type TEXT NOT NULL CHECK (workspace_type IN
+                ('server','hosting_org','website','developer_project')),
+        name           TEXT NOT NULL,
+        UNIQUE (workspace_type, name)
+);
+
+CREATE TABLE permissions (
+        key         TEXT PRIMARY KEY,
+        description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE role_permissions (
+        role_id        INTEGER NOT NULL REFERENCES roles(id),
+        permission_key TEXT NOT NULL REFERENCES permissions(key),
+        PRIMARY KEY (role_id, permission_key)
+);
+
+-- One membership per (user, workspace): a role change updates the row,
+-- revocation clears it. No persona or parent workspace grants implicit
+-- access (PRD §5.6 rule 6) — only these rows do.
+CREATE TABLE workspace_memberships (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id      INTEGER NOT NULL REFERENCES users(id),
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+        role_id      INTEGER NOT NULL REFERENCES roles(id),
+        state        TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked')),
+        expires_at   TEXT NOT NULL DEFAULT '',
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL,
+        UNIQUE (user_id, workspace_id)
+);
+CREATE INDEX IF NOT EXISTS idx_memberships_user      ON workspace_memberships (user_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_workspace ON workspace_memberships (workspace_id);
+
+-- Workspace invitations: single-use, expiring, stored hashed (like
+-- claim tokens). Acceptance grants the invited role exactly once.
+CREATE TABLE workspace_invitations (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+        role_id      INTEGER NOT NULL REFERENCES roles(id),
+        email        TEXT NOT NULL DEFAULT '',
+        token_hash   TEXT NOT NULL UNIQUE,
+        invited_by   INTEGER NOT NULL REFERENCES users(id),
+        created_at   TEXT NOT NULL,
+        expires_at   TEXT NOT NULL,
+        consumed_at  TEXT NOT NULL DEFAULT '',
+        revoked_at   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invitations_workspace ON workspace_invitations (workspace_id);
+
+-- Support grants (PRD §5.4): modeled but DORMANT until the OD-002
+-- policy is decided. No code path reads or writes these rows yet.
+CREATE TABLE support_grants (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id    INTEGER NOT NULL REFERENCES workspaces(id),
+        grantee_user_id INTEGER NOT NULL REFERENCES users(id),
+        reason          TEXT NOT NULL,
+        state           TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
+                ('pending','active','expired','revoked')),
+        created_at      TEXT NOT NULL,
+        activates_at    TEXT NOT NULL DEFAULT '',
+        expires_at      TEXT NOT NULL,
+        revoked_at      TEXT NOT NULL DEFAULT ''
+);
+
+-- Advisory active-workspace per session (RFC §7): UI context only,
+-- never an authorization input. NULL means the server workspace.
+ALTER TABLE sessions ADD COLUMN active_workspace_id INTEGER REFERENCES workspaces(id);
+`,
+		seed: func(ctx context.Context, tx *sql.Tx) error {
+			if err := workspaces.SeedSchema(ctx, tx); err != nil {
+				return fmt.Errorf("seed registry: %w", err)
+			}
+			now := nowStr()
+			// The singleton server workspace for this instance.
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspaces (type, name, state, created_at, updated_at)
+SELECT 'server', 'Primary server', 'active', ?, ?
+WHERE NOT EXISTS (SELECT 1 FROM workspaces WHERE type = 'server')`, now, now); err != nil {
+				return fmt.Errorf("create server workspace: %w", err)
+			}
+			// Wrap every existing account as a server owner so the
+			// upgrade preserves all Phase 1 access (RFC §6: ScopeFull
+			// ≙ server owner; sessions keep working).
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO workspace_memberships (user_id, workspace_id, role_id, state, created_at, updated_at)
+SELECT u.id, w.id, r.id, 'active', ?, ?
+FROM users u
+CROSS JOIN (SELECT id FROM workspaces WHERE type = 'server' ORDER BY id LIMIT 1) w
+CROSS JOIN (SELECT id FROM roles WHERE workspace_type = 'server' AND name = 'owner' ORDER BY id LIMIT 1) r
+WHERE NOT EXISTS (
+        SELECT 1 FROM workspace_memberships m
+        WHERE m.user_id = u.id AND m.workspace_id = w.id AND m.state = 'active'
+)`, now, now); err != nil {
+				return fmt.Errorf("wrap existing users: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // latestVersion is the highest applied-for schema version.
@@ -177,6 +307,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if _, err := tx.ExecContext(ctx, m.up); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %d (%s): %w", m.version, m.name, err)
+		}
+		if m.seed != nil {
+			if err := m.seed(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("seed migration %d (%s): %w", m.version, m.name, err)
+			}
 		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`,

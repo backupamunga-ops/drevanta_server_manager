@@ -1,6 +1,6 @@
 <script lang="ts">
         import { goto } from '$app/navigation';
-        import { fetchMetrics, fetchSession, logout, ApiError, isUp } from '$lib/api';
+        import { fetchMetrics, fetchSession, fetchWorkspaces, logout, ApiError, isUp } from '$lib/api';
         import type { MetricsSnapshot, SessionInfo } from '$lib/api';
         import { formatBytes, formatUptime } from '$lib/format';
         import Sparkline from '$lib/components/Sparkline.svelte';
@@ -30,8 +30,16 @@
                         readiness = r ? 'ready' : 'not-ready';
                 } catch (e) {
                         // Session expired mid-flight: send the operator to sign in again.
-                        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+                        if (e instanceof ApiError && e.status === 401) {
                                 await goto('/login', { replaceState: true });
+                                return;
+                        }
+                        // P2.0: a 403 workspace_mismatch means the session switched into a
+                        // non-server context — go to that workspace's page, NOT to login.
+                        if (e instanceof ApiError && e.status === 403 && e.code === 'workspace_mismatch') {
+                                const list = await fetchWorkspaces().catch(() => null);
+                                const active = list?.workspaces.find((w) => w.id === list?.active_workspace_id);
+                                await goto(active && active.type !== 'server' ? `/org/${active.id}` : '/', { replaceState: true });
                                 return;
                         }
                         lastError = e instanceof Error ? e.message : String(e);
@@ -60,6 +68,17 @@
                                         goto('/onboarding', { replaceState: true });
                                 } else {
                                         authed = true;
+                                        // P2.0: land in the session's active workspace context —
+                                        // a session switched to a hosting organization resumes there.
+                                        fetchWorkspaces()
+                                                .then((list) => {
+                                                        if (cancelled || !list) return;
+                                                        const active = list.workspaces.find((w) => w.id === list.active_workspace_id);
+                                                        if (active && active.type !== 'server') {
+                                                                goto(`/org/${active.id}`, { replaceState: true });
+                                                        }
+                                                })
+                                                .catch(() => undefined);
                                         refresh();
                                         const id = setInterval(refresh, 5000);
                                         return () => clearInterval(id);

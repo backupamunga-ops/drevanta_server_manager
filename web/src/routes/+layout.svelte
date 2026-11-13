@@ -3,6 +3,7 @@
         import { page } from '$app/state';
         import { fetchAccessStatus, type AccessStatus } from '$lib/api';
         import { accessLabel, accessLabelTitle } from '$lib/access.js';
+        import WorkspaceContext from '$lib/components/WorkspaceContext.svelte';
 
         let { children } = $props();
 
@@ -51,13 +52,14 @@
         {@render children()}
 {:else}
         <div class="shell">
-                <header>
-                        <div class="brand">
-                                <span class="brand-mark" aria-hidden="true"></span>
-                                <span class="brand-name">Drevanta</span>
-                                <span class="brand-sub">server console</span>
-                        </div>
-                </header>
+        <header>
+                <div class="brand">
+                        <span class="brand-mark" aria-hidden="true"></span>
+                        <span class="brand-name">Drevanta</span>
+                        <span class="brand-sub">server console</span>
+                </div>
+                <WorkspaceContext />
+        </header>
 
                 <main>
                         {@render children()}

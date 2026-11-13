@@ -27,10 +27,16 @@ func buildHas(t *testing.T, name string) bool {
 func TestPrerenderedRoutesServedDirectly(t *testing.T) {
 	cases := []struct {
 		path, page, wantTitle string
+		// notSPAFallback marks client-rendered shells: their prerendered
+		// page has no <title> of its own (the head content is applied at
+		// hydration), so the assertion is that the SPA entry — whose
+		// title is "Drevanta — Server Console" — was NOT served.
+		notSPAFallback bool
 	}{
-		{"/onboarding", "onboarding.html", "Onboarding — Drevanta"},
-		{"/login", "login.html", "Sign in — Drevanta"},
-		{"/settings", "settings.html", "Settings — Drevanta"},
+		{"/onboarding", "onboarding.html", "Onboarding — Drevanta", false},
+		{"/login", "login.html", "Sign in — Drevanta", false},
+		{"/settings", "settings.html", "Settings — Drevanta", false},
+		{"/invite", "invite.html", "", true},
 	}
 	for _, c := range cases {
 		if !buildHas(t, c.page) {
@@ -53,7 +59,11 @@ func TestPrerenderedRoutesServedDirectly(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s = %d", c.path, resp.StatusCode)
 		}
-		if !strings.Contains(string(body), "<title>"+c.wantTitle+"</title>") {
+		if c.notSPAFallback {
+			if strings.Contains(string(body), "<title>Drevanta — Server Console</title>") {
+				t.Fatalf("GET %s served the SPA fallback instead of %s", c.path, c.page)
+			}
+		} else if !strings.Contains(string(body), "<title>"+c.wantTitle+"</title>") {
 			t.Fatalf("GET %s served the wrong page: title marker %q not found", c.path, c.wantTitle)
 		}
 	}
