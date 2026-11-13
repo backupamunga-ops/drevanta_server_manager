@@ -289,6 +289,59 @@ func TestOrgMembersBoundariesAndRoles(t *testing.T) {
 	}
 }
 
+// Regression: a signed-in invitee must accept without credentials — the
+// session is their identity (one login, many memberships). The accept
+// route used to skip session resolution entirely, pushing signed-in
+// users into the create-account path ("username … and a password …
+// are required").
+func TestInviteAcceptWithExistingSession(t *testing.T) {
+	h, st := newTestHandler(t)
+	ownerHdr := claimAdmin(t, h, st, "owner")
+
+	// Create the invitee account first via the anonymous path (this also
+	// consumes org A's token, exercising single-use once more).
+	rec := do(t, h, http.MethodPost, "/api/v1/workspaces",
+		`{"name":"Org A","business_type":"agency"}`, ownerHdr)
+	orgA := int64(decodeMap(t, rec)["workspace"].(map[string]any)["id"].(float64))
+	rec = do(t, h, http.MethodPost, fmt.Sprintf("/api/v1/workspaces/%d/invitations", orgA),
+		`{"email":"peer@example.com","role":"staff"}`, ownerHdr)
+	tokenA := decodeMap(t, rec)["invitation"].(map[string]any)["token"].(string)
+	rec = do(t, h, http.MethodPost, "/api/v1/workspaces/invitations/accept",
+		fmt.Sprintf(`{"token":%q,"username":"peer","email":"peer@example.com","password":"correct horse battery"}`, tokenA), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anon accept = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Second org invites the same email as owner. The peer is already
+	// signed in, so acceptance needs NO username/password.
+	rec = do(t, h, http.MethodPost, "/api/v1/workspaces",
+		`{"name":"Org B","business_type":"hosting_provider"}`, ownerHdr)
+	orgB := int64(decodeMap(t, rec)["workspace"].(map[string]any)["id"].(float64))
+	rec = do(t, h, http.MethodPost, fmt.Sprintf("/api/v1/workspaces/%d/invitations", orgB),
+		`{"email":"peer@example.com","role":"owner"}`, ownerHdr)
+	tokenB := decodeMap(t, rec)["invitation"].(map[string]any)["token"].(string)
+
+	peerHdr := loginAs(t, h, "peer")
+	rec = do(t, h, http.MethodPost, "/api/v1/workspaces/invitations/accept",
+		fmt.Sprintf(`{"token":%q}`, tokenB), peerHdr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signed-in accept = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decodeMap(t, rec)
+	if body["account_created"] != false {
+		t.Fatalf("signed-in accept must not create an account: %s", rec.Body.String())
+	}
+	if body["role"] != "owner" {
+		t.Fatalf("accept body: %s", rec.Body.String())
+	}
+
+	// The membership is live immediately.
+	rec = do(t, h, http.MethodGet, fmt.Sprintf("/api/v1/workspaces/%d", orgB), "", peerHdr)
+	if rec.Code != http.StatusOK || decodeMap(t, rec)["my_role"] != "owner" {
+		t.Fatalf("org detail as peer = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMembershipRevocationBitesImmediately(t *testing.T) {
 	h, st := newTestHandler(t)
 	ownerHdr := claimAdmin(t, h, st, "owner")

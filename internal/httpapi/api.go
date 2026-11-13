@@ -202,7 +202,8 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	// credential; acceptance attaches to an existing session or creates
 	// the invitee's account (PRD §5.4).
 	mux.HandleFunc("GET /api/v1/workspaces/invitations/{token}", srv.handleInvitationPreview)
-	mux.Handle("POST /api/v1/workspaces/invitations/accept", srv.guard(srv.handleInvitationAccept))
+	mux.Handle("POST /api/v1/workspaces/invitations/accept",
+		srv.guard(srv.withOptionalSession(srv.handleInvitationAccept).ServeHTTP))
 
 	// --- Account profile (email + password management) ---
 	mux.Handle("GET /api/v1/account/profile", srv.requireFullSession(srv.handleAccountProfile))

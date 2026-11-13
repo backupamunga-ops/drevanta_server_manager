@@ -128,6 +128,27 @@ func (s *server) requireSessionHandler(minScope string, next http.HandlerFunc) h
 	return h.ServeHTTP
 }
 
+// withOptionalSession resolves a session when one is presented and attaches
+// it to the request context, but does not require one. For endpoints that
+// serve both anonymous and signed-in flows (invitation acceptance): a
+// signed-in invitee joins with their existing account, everyone else gets
+// the create-account path.
+func (s *server) withOptionalSession(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess, err := s.resolveSession(r)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "session lookup failed")
+			return
+		}
+		if sess != nil {
+			s.touch(sess)
+			next(w, r.WithContext(withSession(r.Context(), sess)))
+			return
+		}
+		next(w, r)
+	})
+}
+
 // requireFullSession is the metrics/dashboard gate.
 func (s *server) requireFullSession(next http.HandlerFunc) http.Handler {
 	return s.requireSession(store.ScopeFull, next)

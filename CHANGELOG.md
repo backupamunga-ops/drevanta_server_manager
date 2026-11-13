@@ -4,11 +4,21 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
-# Changelog
+## [0.5.2] — Fix: signed-in invite acceptance
 
-All notable changes to Drevanta are documented here.
-Format follows Keep a Changelog; versioning is CalVer-ish per sprint
-(`0.<sprint>.<stage>`).
+### Fixed
+- **Invitation acceptance resolves the caller's session.** The accept
+  route was mounted without session resolution, so `sessionFrom` was
+  always nil and every signed-in invitee was pushed into the
+  create-account path ("username 3-32 chars … and a password of at
+  least 12 characters are required") despite the page correctly
+  showing "Signed in as <username>". The route now wraps the handler
+  in `withOptionalSession`: an existing session joins the workspace
+  with one click and no credentials (no new account —
+  `account_created: false`); anonymous invitees still get the
+  create-account path unchanged. Regression test
+  `TestInviteAcceptWithExistingSession` covers invite → sign-in →
+  accept → owner membership live.
 
 ## [0.5.1] — P2.1 observability: metric history, processes, services, alerts, first preflight
 

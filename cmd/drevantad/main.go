@@ -41,7 +41,7 @@ import (
 // the release workflow injects the pushed tag (v0.4.3 -> "0.4.3") and fails
 // closed if the built binary does not report it. This literal is only the
 // fallback for local, non-release builds.
-var version = "0.5.1"
+var version = "0.5.2"
 
 // defaultClaimTTL is the locked first-time-setup UX default: a claim
 // token lives just long enough to onboard immediately after install.
