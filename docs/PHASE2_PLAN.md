@@ -1,10 +1,12 @@
 # Phase 2 plan — Complete Linux Administration
 
-Source of requirements: `upload/Phase_2_Complete_Linux_Administration_PRD.md`
-(Phase 2 PRD v1.0, 2026-11-13). This plan maps the PRD onto Drevanta's
-actual names, versions and milestones. The PRD's `platformd` /
-`platform-helper` names are illustrative — per its §30 we keep Phase 1
-naming and grow incrementally.
+Source of requirements: [phase-2/PHASE2_PRD.md](phase-2/PHASE2_PRD.md)
+(Phase 2 PRD, now **v1.1** — the PRD lives in the repo with the
+2026-11-13 identity decisions applied; the original upload stays
+untouched). This plan maps the PRD onto Drevanta's actual names,
+versions and milestones. The PRD's `platformd` / `platform-helper`
+names are illustrative — per its §30 we keep Phase 1 naming and grow
+incrementally.
 
 ## Versioning and what already shipped
 
@@ -27,7 +29,7 @@ starts at **0.5.0**.
 
 | Milestone | Version | Deliver (PRD §25) | Drevanta-specific shape |
 |---|---|---|---|
-| P2.0 identity, personas, workspaces | **0.5.0** | Workspace types (`server`, `hosting_org`, `website`, `developer_project`); memberships; role/permission registry (§6.2 namespace); workspace selector in the header; invitations; scope-aware API middleware; support-grant model; cross-tenant tests | New `internal/workspaces/` + migrations on the existing `users`/`sessions` tables; owner's Phase 1 access becomes their `server` workspace automatically; shell header gains the selector (§7.1) |
+| P2.0 identity, personas, workspaces | **0.5.0** | Workspace types (`server`, `hosting_org`, `website`, `developer_project`); memberships; role/permission registry (§6.2 namespace); workspace selector in the header; invitations; scope-aware API middleware; support-grant model; cross-tenant tests | Design **finalized** — [phase-2/P2.0-identity-workspaces.md](phase-2/P2.0-identity-workspaces.md) (OD-001 decided 2026-11-13): switching never grants privileges; a reseller manages assigned customer sites from the Hosting workspace (agency management mode) and reaches Website Owner context only via membership or audited support grant; one `hosting_org` type with a `business_type` attribute (`reseller` / `hosting_provider` / `agency`). New `internal/workspaces/` + migrations on the existing `users`/`sessions` tables; owner's Phase 1 access becomes their `server` workspace automatically; shell header gains the selector (§7.1) |
 | P2.1 observability + resource signals | **0.5.1** | Server overview; metric history with bounded retention + downsampling; process list; service health; alerts; first preflight API | Extend `internal/metrics/` (no new daemons); new `metric_samples`/`health_alerts` tables with retention budgets; read-only role access verified |
 | P2.2 privileged helper, services, logs, files | **0.5.2** | Socket-activated root helper; strict protocol v1 (§19, 16 KiB frames); root-owned policy; approved systemd actions; journal viewer; restricted file manager; durable jobs | New `cmd/drevanta-helper/` + `internal/privilege/` (protocol/policy/client) and `internal/jobs/`; unit allowlist protects `drevantad`, `drevanta-helper`, `ssh`; file roots configured, never `/` |
 | P2.3 security administration | **0.5.3** | nftables management; SSH settings/keys; Linux users & groups; independent rollback for remote-access changes; high-risk confirmations | Typed helper operations only (`firewall.apply`, `ssh.config.apply`, `user.create/disable`); validation before activation; recovery CLI; provider-console guidance in the UI |
@@ -41,17 +43,20 @@ are deliberately not promised (PRD §0).
 ## Engineering docs required before each milestone (PRD §30)
 
 The RFC for each milestone lands in `docs/phase-2/` in the release that
-starts it: identity/workspace RFC (0.5.0), monitoring RFC (0.5.1),
-helper protocol RFC (0.5.2), remote-access safety RFC (0.5.3),
-maintenance RFC (0.5.4), performance/security test plan (0.5.5).
+starts it: monitoring RFC (0.5.1), helper protocol RFC (0.5.2),
+remote-access safety RFC (0.5.3), maintenance RFC (0.5.4),
+performance/security test plan (0.5.5). The identity/workspace RFC has
+landed early as [phase-2/P2.0-identity-workspaces.md](phase-2/P2.0-identity-workspaces.md)
+(finalized 2026-11-13).
 
 ## Open decisions that block or shape work
 
-- **OD-001 (needs user confirmation before 0.5.0 ships):** a reseller
-  does NOT automatically switch into a website-owner persona; they
-  manage customer relationships inside the hosting workspace, and a
-  website context requires an explicit membership or audited support
-  grant. This plan assumes the PRD's conservative interpretation.
+- **Resolved (OD-001, 2026-11-13):** a reseller does NOT switch into a
+  website-owner persona; they manage customer relationships and
+  authorized sites inside the hosting workspace, and a website context
+  requires an explicit membership or audited support grant. Full model
+  and ground rules:
+  [phase-2/P2.0-identity-workspaces.md](phase-2/P2.0-identity-workspaces.md).
 - **OD-002:** support access = time-limited, reason-coded, audited
   grant; never credential sharing. Policy needed before 0.5.2.
 - **OD-012:** admin file roots are explicit configured paths only;
