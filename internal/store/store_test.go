@@ -67,10 +67,17 @@ func TestAuditInsertAndReadBack(t *testing.T) {
 }
 
 func openTestStore(t *testing.T) *Store {
+	return OpenTestStore(t)
+}
+
+// OpenTestStore is the exported test-store helper for sibling packages
+// (internal/metrics tests need a real migrated store).
+func OpenTestStore(t testing.TB) *Store {
 	t.Helper()
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }

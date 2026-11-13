@@ -263,11 +263,71 @@ CROSS JOIN (SELECT id FROM roles WHERE workspace_type = 'server' AND name = 'own
 WHERE NOT EXISTS (
         SELECT 1 FROM workspace_memberships m
         WHERE m.user_id = u.id AND m.workspace_id = w.id AND m.state = 'active'
-)`, now, now); err != nil {
+			)`, now, now); err != nil {
 				return fmt.Errorf("wrap existing users: %w", err)
 			}
 			return nil
 		},
+	},
+	{
+		version: 6,
+		name:    "observability_foundation",
+		up: `
+-- P2.1 observability (RFC docs/phase-2/P2.1-observability-rfc.md).
+-- metric_samples: raw 15 s rows written by the in-process sampler.
+-- Retention: 24 h, then folded into 5-minute aggregates.
+CREATE TABLE metric_samples (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        taken_at            TEXT NOT NULL,           -- RFC3339Nano, UTC
+        cpu_percent         REAL NOT NULL,
+        load1               REAL NOT NULL,
+        load5               REAL NOT NULL,
+        load15              REAL NOT NULL,
+        mem_used_bytes      INTEGER NOT NULL,
+        mem_available_bytes INTEGER NOT NULL,
+        mem_total_bytes     INTEGER NOT NULL,
+        swap_used_bytes     INTEGER NOT NULL DEFAULT 0,
+        swap_total_bytes    INTEGER NOT NULL DEFAULT 0,
+        disks               TEXT NOT NULL DEFAULT '[]' -- JSON [{path,total,available,used_percent}]
+);
+CREATE INDEX IF NOT EXISTS idx_metric_samples_taken ON metric_samples (taken_at);
+
+-- metric_samples_5m: downsampled aggregates for everything older than
+-- the raw window. Retention: 14 days.
+CREATE TABLE metric_samples_5m (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket_start      TEXT NOT NULL,         -- RFC3339Nano, UTC, 5m aligned
+        cpu_avg           REAL NOT NULL,
+        cpu_max           REAL NOT NULL,
+        load5_avg         REAL NOT NULL,
+        mem_avg_bytes     INTEGER NOT NULL,
+        mem_max_bytes     INTEGER NOT NULL,
+        mem_available_min INTEGER NOT NULL,
+        disk_worst_max    REAL NOT NULL,         -- worst mount used %, bucket avg
+        swap_max_bytes    INTEGER NOT NULL DEFAULT 0,
+        swap_total_bytes  INTEGER NOT NULL DEFAULT 0,
+        samples_count     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_metric_samples_5m_bucket ON metric_samples_5m (bucket_start);
+
+-- health_alerts: one row per (kind, subject) condition; warn->crit
+-- escalates in place. Anti-flap lives in the evaluator, dedup here.
+CREATE TABLE health_alerts (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind          TEXT NOT NULL,             -- disk | memory | load | swap
+        subject       TEXT NOT NULL,             -- mount path or 'memory' | 'load' | 'swap'
+        severity      TEXT NOT NULL CHECK (severity IN ('warn','crit')),
+        message       TEXT NOT NULL,
+        value         REAL NOT NULL,
+        threshold     REAL NOT NULL,
+        state         TEXT NOT NULL CHECK (state IN ('open','resolved')),
+        first_seen_at TEXT NOT NULL,
+        last_seen_at  TEXT NOT NULL,
+        resolved_at   TEXT NOT NULL DEFAULT '',
+        UNIQUE (kind, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_health_alerts_state ON health_alerts (state);
+`,
 	},
 }
 

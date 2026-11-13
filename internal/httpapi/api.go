@@ -139,9 +139,10 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	mux.HandleFunc("GET /readyz", srv.handleReadyz)
 	// Server-scoped surfaces additionally require the server workspace
-	// context (P2.0): switching into a hosting org hides them.
+	// context (P2.0) and, since 0.5.1, the P2.0 registry permission:
+	// a full-scope session whose role lacks system.metrics.read gets 403.
 	mux.Handle("GET /api/v1/server/metrics",
-		srv.requireFullSession(srv.requireServerContext(srv.handleMetrics).ServeHTTP))
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemMetricsRead, srv.handleMetrics).ServeHTTP))
 
 	// --- Sprint 2 identity / onboarding ---
 	mux.HandleFunc("GET /api/v1/auth/session", srv.handleSessionInfo)
@@ -165,6 +166,22 @@ func NewWithAccess(st *store.Store, version string, diskPaths []string, access *
 		srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.requireServerContext(srv.handleDomainApply).ServeHTTP)))
 	mux.Handle("POST /api/v1/access/domain/remove",
 		srv.guard(srv.requireSessionHandler(store.ScopeFull, srv.requireServerContext(srv.handleDomainRemove).ServeHTTP)))
+
+	// --- P2.1 observability (read-only; RFC phase-2/P2.1-observability-rfc.md) ---
+	// Every route: full session + server workspace context + registry
+	// permission, re-derived per request. No mutations exist in 0.5.1.
+	mux.Handle("GET /api/v1/server/overview",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemOverviewRead, srv.handleOverview).ServeHTTP))
+	mux.Handle("GET /api/v1/server/metrics/history",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemMetricsRead, srv.handleMetricsHistory).ServeHTTP))
+	mux.Handle("GET /api/v1/server/processes",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemProcessesRead, srv.handleProcesses).ServeHTTP))
+	mux.Handle("GET /api/v1/server/services",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemServicesRead, srv.handleServices).ServeHTTP))
+	mux.Handle("GET /api/v1/server/alerts",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemOverviewRead, srv.handleAlerts).ServeHTTP))
+	mux.Handle("GET /api/v1/server/preflight",
+		srv.requireFullSession(srv.requireServerPerm(workspaces.PSystemOverviewRead, srv.handlePreflight).ServeHTTP))
 
 	// --- P2.0 workspaces (identity foundation) ---
 	mux.Handle("GET /api/v1/workspaces", srv.requireFullSession(srv.handleWorkspacesList))

@@ -10,6 +10,48 @@ All notable changes to Drevanta are documented here.
 Format follows Keep a Changelog; versioning is CalVer-ish per sprint
 (`0.<sprint>.<stage>`).
 
+## [0.5.1] — P2.1 observability: metric history, processes, services, alerts, first preflight
+
+Phase 2 milestone P2.1 (per `docs/phase-2/P2.1-observability-rfc.md`,
+decided 2026-11-13). Read-only end to end — every mutation path
+arrives with the P2.2 privileged helper.
+
+### Added
+- **In-process metric sampler** (RFC D-01). drevantad collects a
+  snapshot every 15 s into `metric_samples` — no helper daemon, no
+  systemd timers; the loop recovers from errors instead of dying.
+- **Bounded retention + downsampling** (RFC D-02). Raw rows live
+  24 h, then are folded in single transactions into 5-minute
+  aggregates (`metric_samples_5m`) kept 14 days. Worst-case footprint
+  is single-digit MB — safe on the 512 MB-class target. The API blends
+  both tiers and labels each point `raw` or `5m`.
+- **Health alerts** (RFC D-04). Disk ≥ 80/90 %, memory available
+  ≤ 10/5 %, swap ≥ 80/90 %, load5 > 2 × cores (3 consecutive ticks).
+  Anti-flap: 2 ticks to open, 2 to resolve; warn→crit escalates in
+  place. `GET /api/v1/server/alerts`; transitions audited
+  (`alert_opened` / `alert_resolved`).
+- **Process list** (RFC D-05). `GET /api/v1/server/processes` — top 50
+  by CPU% measured over a disclosed 500 ms window; computed from
+  /proc per request, never stored.
+- **Service health** (RFC D-06). `GET /api/v1/server/services` — two
+  read-only `systemctl` list calls (units + unit-file enablement),
+  failed units sorted first, honest 503 where systemd is absent.
+- **Server overview** (RFC D-03). `GET /api/v1/server/overview` — one
+  call: live snapshot, 24 h history, open alerts, systemd rollup,
+  worst disk.
+- **First preflight** (RFC D-07). `GET /api/v1/server/preflight?
+  kind=package_upgrade` — disk/memory/load/alert envelope that P2.4
+  upgrades and P2.5 cross-module preflights build on. Unknown kinds
+  answer 400 with the known list.
+- **Console sections** (RFC D-08). Tab strip on the shell: Overview
+  (cards + 24 h CPU sparkline + alert strip + systemd rollup),
+  /processes (manual + optional 10 s auto-refresh), /services (unit
+  table with an explicit read-only note — no fake action buttons).
+- **Registry enforcement for reads** (plan: "read-only role access
+  verified"). The metrics endpoint now requires `system.metrics.read`
+  on the server workspace, not just full scope; every observability
+  route re-derives server context + registry permission per request.
+
 ## [0.5.0] — P2.0 identity foundation: workspaces, personas, memberships
 
 Phase 2.0 begins (Phase 2 plan, milestone P2.0). The decided identity

@@ -37,6 +37,8 @@ func TestPrerenderedRoutesServedDirectly(t *testing.T) {
 		{"/login", "login.html", "Sign in — Drevanta", false},
 		{"/settings", "settings.html", "Settings — Drevanta", false},
 		{"/invite", "invite.html", "", true},
+		{"/processes", "processes.html", "Processes — Drevanta", false},
+		{"/services", "services.html", "Services — Drevanta", false},
 	}
 	for _, c := range cases {
 		if !buildHas(t, c.page) {

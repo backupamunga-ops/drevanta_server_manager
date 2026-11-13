@@ -27,6 +27,8 @@ var prettyPages = map[string]string{
 	"login":      "login.html",
 	"settings":   "settings.html",
 	"invite":     "invite.html",
+	"processes":  "processes.html",
+	"services":   "services.html",
 }
 
 // Handler serves the embedded static dashboard with an index.html

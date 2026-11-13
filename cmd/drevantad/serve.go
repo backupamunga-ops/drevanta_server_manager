@@ -17,6 +17,7 @@ import (
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/backup"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpapi"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/httpsd"
+	"github.com/backupamunga-ops/drevanta_server_manager/internal/metrics"
 	"github.com/backupamunga-ops/drevanta_server_manager/internal/store"
 )
 
@@ -53,6 +54,17 @@ func run(addr, dataDir string) error {
 	go backup.Loop(ctx, st, dataDir, 7)
 
 	diskPaths := dedupe([]string{"/", dataDir})
+
+	// P2.1 observability (RFC docs/phase-2/P2.1-observability-rfc.md):
+	// the in-process metric sampler writes history, folds and prunes on
+	// the retention budget, and evaluates health alerts. Its own
+	// collector keeps an independent CPU delta state from the on-demand
+	// endpoint's collector.
+	sampler := metrics.NewSampler(metrics.NewCollector(diskPaths), st)
+	sampler.Audit = func(c context.Context, actor, action, target string, detail map[string]any) {
+		_ = st.Audit(context.WithoutCancel(c), actor, action, target, detail)
+	}
+	go sampler.Run(ctx)
 	// The access view points the access-mode/domain endpoints at the
 	// same root-managed configuration and secret-free status files the
 	// CLI uses; the overlay directory is where the daemon stores the

@@ -496,3 +496,112 @@ export const ROLES_BY_TYPE: Record<WorkspaceType, string[]> = {
 	website: ['owner', 'manager', 'viewer'],
 	developer_project: ['owner', 'maintainer', 'viewer']
 };
+
+// --- P2.1 observability (read-only; RFC phase-2/P2.1-observability-rfc.md) ---
+
+export interface HistoryPoint {
+	t: string;
+	cpu_avg: number;
+	cpu_max: number;
+	mem_avg_bytes: number;
+	mem_max_bytes: number;
+	disk_worst: number;
+	resolution: 'raw' | '5m';
+}
+
+export interface HealthAlert {
+	id: number;
+	kind: string;
+	subject: string;
+	severity: 'warn' | 'crit';
+	message: string;
+	value: number;
+	threshold: number;
+	state: 'open' | 'resolved';
+	first_seen_at: string;
+	last_seen_at: string;
+	resolved_at: string;
+}
+
+export interface SystemdSummary {
+	total: number;
+	running: number;
+	failed: number;
+}
+
+export interface OverviewResponse {
+	snapshot: MetricsSnapshot;
+	history: HistoryPoint[] | null;
+	alerts: HealthAlert[] | null;
+	systemd: SystemdSummary | null;
+	worst_disk: number;
+	worst_path: string;
+}
+
+export interface ProcessRow {
+	pid: number;
+	ppid: number;
+	user: string;
+	state: string;
+	rss_bytes: number;
+	cpu_percent: number;
+	cmdline: string;
+}
+
+export interface ProcessesResponse {
+	measured_over_ms: number;
+	processes: ProcessRow[];
+}
+
+export interface ServiceUnit {
+	unit: string;
+	load: string;
+	active: string;
+	sub: string;
+	description: string;
+	enabled: string;
+}
+
+export interface ServicesResponse {
+	summary: SystemdSummary;
+	units: ServiceUnit[];
+}
+
+export interface PreflightCheck {
+	name: string;
+	ok: boolean;
+	value: number;
+	threshold: number;
+	message: string;
+}
+
+export interface PreflightResponse {
+	kind: string;
+	ok: boolean;
+	checks: PreflightCheck[];
+}
+
+/** The console's one-load overview call (live snapshot + 24 h + alerts). */
+export function fetchOverview(): Promise<OverviewResponse> {
+	return getJSON<OverviewResponse>('/api/v1/server/overview');
+}
+
+export function fetchHistory(window: '1h' | '24h' | '7d' | '14d' = '24h'): Promise<{ window: string; points: HistoryPoint[] }> {
+	return getJSON(`/api/v1/server/metrics/history?window=${encodeURIComponent(window)}`);
+}
+
+export function fetchProcesses(): Promise<ProcessesResponse> {
+	return getJSON<ProcessesResponse>('/api/v1/server/processes');
+}
+
+export function fetchServices(): Promise<ServicesResponse> {
+	return getJSON<ServicesResponse>('/api/v1/server/services');
+}
+
+export function fetchAlerts(): Promise<{ alerts: HealthAlert[] }> {
+	return getJSON('/api/v1/server/alerts');
+}
+
+export function fetchPreflight(kind: string): Promise<PreflightResponse> {
+	return getJSON(`/api/v1/server/preflight?kind=${encodeURIComponent(kind)}`);
+}
